@@ -1,0 +1,440 @@
+<?php
+date_default_timezone_set('America/Sao_Paulo');
+session_start();
+
+require_once 'config.php'; 
+$conexao = $pdo;
+
+if (!isset($_SESSION['usuario_id'])) {
+    header('Location: login.php');
+    exit;
+}
+
+
+function formatarCPF($cpf) {
+    if (strlen($cpf) === 11) {
+        return substr($cpf, 0, 3) . '.' . substr($cpf, 3, 3) . '.' . substr($cpf, 6, 3) . '-' . substr($cpf, 9, 2);
+    }
+    return $cpf;
+}
+
+
+if (isset($_GET['exportar']) && $_GET['exportar'] == 'excel') {
+    $id_treinamento = $_GET['id'] ?? 0;
+    
+    if ($id_treinamento) {
+        try {
+            
+            $stmt = $conexao->prepare("SELECT * FROM Treinamentos WHERE id_treinamento = ?");
+            $stmt->execute([$id_treinamento]);
+            $treinamento = $stmt->fetch(PDO::FETCH_ASSOC);
+            
+            if ($treinamento) {
+                
+                $stmt = $conexao->prepare("SELECT * FROM Treinamento_Participantes WHERE id_treinamento = ? ORDER BY hora_entrada");
+                $stmt->execute([$id_treinamento]);
+                $participantes_treinamento = $stmt->fetchAll(PDO::FETCH_ASSOC);
+                
+                
+                header('Content-Type: application/vnd.ms-excel');
+                header('Content-Disposition: attachment; filename="treinamento_' . $id_treinamento . '.xls"');
+                header('Pragma: no-cache');
+                header('Expires: 0');
+                
+                
+                echo "<table border='1'>";
+                echo "<tr><th colspan='8' style='background-color: #2c3e50; color: white;'>Dados do Treinamento</th></tr>";
+                echo "<tr><th>Assunto</th><th>Data</th><th>Educador</th><th>Hora Início</th><th>Hora Término</th><th>Setor Educador</th><th>Matriz Anual</th><th>Qualidade/Segurança</th></tr>";
+                echo "<tr>";
+                echo "<td>" . htmlspecialchars($treinamento['assunto']) . "</td>";
+                echo "<td>" . date('d/m/Y', strtotime($treinamento['data_treinamento'])) . "</td>";
+                echo "<td>" . htmlspecialchars($treinamento['nome_educador']) . "</td>";
+                echo "<td>" . date('H:i', strtotime($treinamento['hora_inicio'])) . "</td>";
+                echo "<td>" . (!empty($treinamento['hora_fim']) ? date('H:i', strtotime($treinamento['hora_fim'])) : 'Não finalizado') . "</td>";
+                echo "<td>" . htmlspecialchars($treinamento['setor_educador']) . "</td>";
+                echo "<td>" . ($treinamento['matriz_anual'] ? 'Sim' : 'Não') . "</td>";
+                echo "<td>" . ($treinamento['qualidade_seguranca'] ? 'Sim' : 'Não') . "</td>";
+                echo "</tr>";
+                
+                echo "<tr><td colspan='8'>&nbsp;</td></tr>";
+                
+                
+                echo "<tr><th colspan='8' style='background-color: #2c3e50; color: white;'>Lista de Participantes</th></tr>";
+                echo "<tr><th>Nome</th><th>Matrícula</th><th>Setor</th><th>Cargo</th><th>CPF</th><th>Hora Entrada</th><th>Hora Saída</th><th>Status</th></tr>";
+                
+                foreach ($participantes_treinamento as $participante) {
+                    $saiu = !empty($participante['hora_saida']);
+                    $status = $saiu ? 'Finalizado' : 'Presente';
+                    
+                    echo "<tr>";
+                    echo "<td>" . htmlspecialchars($participante['nome_participante']) . "</td>";
+                    echo "<td>" . htmlspecialchars($participante['matricula']) . "</td>";
+                    echo "<td>" . htmlspecialchars($participante['setor']) . "</td>";
+                    echo "<td>" . htmlspecialchars($participante['categoria']) . "</td>";
+                    echo "<td>" . (!empty($participante['cpf']) ? formatarCPF($participante['cpf']) : '-') . "</td>";
+                    echo "<td>" . $participante['hora_entrada'] . "</td>";
+                    echo "<td>" . ($saiu ? $participante['hora_saida'] : '-') . "</td>";
+                    echo "<td>" . $status . "</td>";
+                    echo "</tr>";
+                }
+                
+                echo "</table>";
+                exit;
+            }
+        } catch (PDOException $e) {
+           
+            header('Location: detalhes_treinamento.php?id=' . $id_treinamento . '&erro=exportacao');
+            exit;
+        }
+    }
+}
+
+
+$treinamento = null;
+$participantes_treinamento = [];
+$id_treinamento = $_GET['id'] ?? 0;
+
+
+if ($id_treinamento) {
+    try {
+        
+        $stmt = $conexao->prepare("SELECT * FROM Treinamentos WHERE id_treinamento = ?");
+        $stmt->execute([$id_treinamento]);
+        $treinamento = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        if ($treinamento) {
+            
+            $stmt = $conexao->prepare("SELECT * FROM Treinamento_Participantes WHERE id_treinamento = ? ORDER BY hora_entrada");
+            $stmt->execute([$id_treinamento]);
+            $participantes_treinamento = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        } else {
+            $mensagem = "Treinamento não encontrado ou ID inválido.";
+        }
+    } catch (PDOException $e) {
+        $mensagem = "Erro ao buscar dados: " . $e->getMessage();
+    }
+} else {
+    $mensagem = "ID do treinamento não especificado.";
+}
+?>
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Detalhes do Treinamento - Módulo Bússola</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+    <style>
+        :root {
+            --primary-color: #2c3e50;
+            --secondary-color: #3498db;
+            --light-color: #ecf0f1;
+        }
+        
+        body {
+            background-color: #f8f9fa;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        
+        .navbar {
+            background-color: var(--primary-color) !important;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+        
+        .navbar-brand {
+            font-weight: 600;
+        }
+        
+        .card {
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+            margin-bottom: 20px;
+            border: none;
+        }
+        
+        .card-header {
+            background-color: var(--primary-color);
+            color: white;
+            border-radius: 10px 10px 0 0 !important;
+            padding: 15px 20px;
+        }
+        
+        .btn-primary {
+            background-color: var(--secondary-color);
+            border-color: var(--secondary-color);
+        }
+        
+        .btn-primary:hover {
+            background-color: #2980b9;
+            border-color: #2980b9;
+        }
+        
+        .btn-warning {
+            background-color: #f39c12;
+            border-color: #f39c12;
+            color: white;
+        }
+        
+        .btn-warning:hover {
+            background-color: #e67e22;
+            border-color: #e67e22;
+            color: white;
+        }
+        
+        .info-box {
+            background-color: #f8f9fa;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 20px;
+            border-left: 4px solid var(--secondary-color);
+        }
+        
+        .info-label {
+            font-weight: 600;
+            color: var(--primary-color);
+        }
+        
+        .participant-list {
+            max-height: 500px;
+            overflow-y: auto;
+        }
+        
+        .status-presente {
+            background-color: #28a745;
+            color: white;
+        }
+        
+        .status-finalizado {
+            background-color: #6c757d;
+            color: white;
+        }
+        
+        .export-btn {
+            transition: all 0.3s;
+        }
+        
+        .export-btn:hover {
+            transform: scale(1.05);
+        }
+    </style>
+</head>
+<body>
+
+<nav class="navbar navbar-expand-lg navbar-dark mb-4">
+    <div class="container">
+        <a class="navbar-brand d-flex align-items-center" href="#">
+            <i class="bi bi-compass me-2"></i>
+            Módulo Bússola - Detalhes do Treinamento
+        </a>
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+            <span class="navbar-toggler-icon"></span>
+        </button>
+        <div class="collapse navbar-collapse" id="navbarNav">
+            <ul class="navbar-nav ms-auto">
+                <li class="nav-item">
+                    <a class="nav-link" href="home.php"><i class="bi bi-house-door me-1"></i>Início</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link" href="cracha.php"><i class="bi bi-plus-circle me-1"></i>Novo Treinamento</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link" href="consulta.php"><i class="bi bi-search me-1"></i>Consulta</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link active" href="#"><i class="bi bi-info-circle me-1"></i>Detalhes</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link" href="logout.php"><i class="bi bi-box-arrow-right me-1"></i>Sair</a>
+                </li>
+            </ul>
+        </div>
+    </div>
+</nav>
+
+<div class="container mb-5">
+    <div class="row justify-content-center">
+        <div class="col-lg-10">
+            <?php if (isset($mensagem)): ?>
+                <div class="alert alert-danger text-center">
+                    <i class="bi bi-exclamation-triangle me-2"></i>
+                    <?php echo $mensagem; ?>
+                </div>
+                <div class="text-center mt-4">
+                    <a href="consulta.php" class="btn btn-primary">
+                        <i class="bi bi-arrow-left me-2"></i>Voltar para Consulta
+                    </a>
+                </div>
+            <?php elseif (!$treinamento): ?>
+                <div class="alert alert-danger text-center">
+                    <i class="bi bi-exclamation-triangle me-2"></i>
+                    Treinamento não encontrado ou ID inválido.
+                </div>
+                <div class="text-center mt-4">
+                    <a href="consulta.php" class="btn btn-primary">
+                        <i class="bi bi-arrow-left me-2"></i>Voltar para Consulta
+                    </a>
+                </div>
+            <?php else: ?>
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h1 class="h4 mb-0">Detalhes do Treinamento #<?php echo $treinamento['id_treinamento']; ?></h1>
+                        <div>
+                            <a href="editar_treinamento.php?id=<?php echo $id_treinamento; ?>" class="btn btn-warning btn-sm me-2">
+                                <i class="bi bi-pencil me-1"></i>Editar
+                            </a>
+                            <a href="?exportar=excel&id=<?php echo $id_treinamento; ?>" class="btn btn-success btn-sm me-2 export-btn">
+                                <i class="bi bi-file-earmark-excel me-1"></i>Exportar
+                            </a>
+                            <a href="consulta.php" class="btn btn-secondary btn-sm">
+                                <i class="bi bi-arrow-left me-1"></i>Voltar
+                            </a>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                      
+                        <div class="info-box mb-4">
+                            <h2 class="h5 mb-4"><i class="bi bi-info-circle me-2"></i>Informações do Treinamento</h2>
+                            
+                            <div class="row">
+                                <div class="col-md-6 mb-3">
+                                    <span class="info-label">Assunto:</span>
+                                    <p><?php echo htmlspecialchars($treinamento['assunto']); ?></p>
+                                </div>
+                                <div class="col-md-3 mb-3">
+                                    <span class="info-label">Data:</span>
+                                    <p><?php echo date('d/m/Y', strtotime($treinamento['data_treinamento'])); ?></p>
+                                </div>
+                                <div class="col-md-3 mb-3">
+                                    <span class="info-label">Status:</span>
+                                    <p>
+                                        <?php if (empty($treinamento['hora_fim'])): ?>
+                                            <span class="badge bg-warning text-dark">Em Andamento</span>
+                                        <?php else: ?>
+                                            <span class="badge bg-success">Finalizado</span>
+                                        <?php endif; ?>
+                                    </p>
+                                </div>
+                                
+                                <div class="col-md-4 mb-3">
+                                    <span class="info-label">Educador:</span>
+                                    <p><?php echo htmlspecialchars($treinamento['nome_educador']); ?></p>
+                                </div>
+                                <div class="col-md-4 mb-3">
+                                    <span class="info-label">Tipo de Educador:</span>
+                                    <p><?php echo $treinamento['educador_interno'] ? 'Interno' : 'Externo'; ?></p>
+                                </div>
+                                <div class="col-md-4 mb-3">
+                                    <span class="info-label">Setor do Educador:</span>
+                                    <p><?php echo htmlspecialchars($treinamento['setor_educador']); ?></p>
+                                </div>
+                                
+                                <div class="col-md-3 mb-3">
+                                    <span class="info-label">Hora de Início:</span>
+                                    <p><?php echo date('H:i', strtotime($treinamento['hora_inicio'])); ?></p>
+                                </div>
+                                <div class="col-md-3 mb-3">
+                                    <span class="info-label">Hora de Término:</span>
+                                    <p><?php echo !empty($treinamento['hora_fim']) ? date('H:i', strtotime($treinamento['hora_fim'])) : 'Não finalizado'; ?></p>
+                                </div>
+                                <div class="col-md-3 mb-3">
+                                    <span class="info-label">Matriz Anual:</span>
+                                    <p><?php echo $treinamento['matriz_anual'] ? 'Sim' : 'Não'; ?></p>
+                                </div>
+                                <div class="col-md-3 mb-3">
+                                    <span class="info-label">Qualidade/Segurança:</span>
+                                    <p><?php echo $treinamento['qualidade_seguranca'] ? 'Sim' : 'Não'; ?></p>
+                                </div>
+                            </div>
+                        </div>
+                        
+                      
+                        <div class="participant-section">
+                            <div class="d-flex justify-content-between align-items-center mb-4">
+                                <h2 class="h5 mb-0"><i class="bi bi-people-fill me-2"></i>Participantes</h2>
+                                <span class="badge bg-primary">
+                                    Total: <?php echo count($participantes_treinamento); ?>
+                                </span>
+                            </div>
+                            
+                            <?php if (!empty($participantes_treinamento)): ?>
+                                <div class="table-responsive participant-list">
+                                    <table class="table table-striped table-hover">
+                                        <thead>
+                                            <tr>
+                                                <th>Nome</th>
+                                                <th>Matrícula</th>
+                                                <th>Setor</th>
+                                                <th>Cargo</th>
+                                                <th>CPF</th>
+                                                <th>Hora Entrada</th>
+                                                <th>Hora Saída</th>
+                                                <th>Status</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            <?php 
+                                            $presentes = 0;
+                                            $finalizados = 0;
+                                            
+                                            foreach ($participantes_treinamento as $participante): 
+                                                $saiu = !empty($participante['hora_saida']);
+                                                
+                                                if ($saiu) {
+                                                    $finalizados++;
+                                                } else {
+                                                    $presentes++;
+                                                }
+                                            ?>
+                                            <tr>
+                                                <td><?php echo htmlspecialchars($participante['nome_participante']); ?></td>
+                                                <td><?php echo htmlspecialchars($participante['matricula']); ?></td>
+                                                <td><?php echo htmlspecialchars($participante['setor']); ?></td>
+                                                <td><?php echo htmlspecialchars($participante['categoria']); ?></td>
+                                                <td><?php echo !empty($participante['cpf']) ? formatarCPF($participante['cpf']) : '-'; ?></td>
+                                                <td><?php echo $participante['hora_entrada']; ?></td>
+                                                <td><?php echo $saiu ? $participante['hora_saida'] : '-'; ?></td>
+                                                <td>
+                                                    <?php if ($saiu): ?>
+                                                        <span class="badge status-finalizado">Finalizado</span>
+                                                    <?php else: ?>
+                                                        <span class="badge status-presente">Presente</span>
+                                                    <?php endif; ?>
+                                                </td>
+                                            </tr>
+                                            <?php endforeach; ?>
+                                        </tbody>
+                                        <tfoot>
+                                            <tr>
+                                                <td colspan="8" class="text-end">
+                                                    <strong>Total de Participantes:</strong> <?php echo count($participantes_treinamento); ?> |
+                                                    <strong>Presentes:</strong> <?php echo $presentes; ?> |
+                                                    <strong>Finalizados:</strong> <?php echo $finalizados; ?>
+                                                </td>
+                                            </tr>
+                                        </tfoot>
+                                    </table>
+                                </div>
+                            <?php else: ?>
+                                <div class="alert alert-info text-center">
+                                    <i class="bi bi-info-circle me-2"></i>Nenhum participante registrado neste treinamento.
+                                </div>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                </div>
+            <?php endif; ?>
+        </div>
+    </div>
+</div>
+
+<footer class="mt-5 py-3 bg-light">
+    <div class="container text-center">
+        <p class="mb-0">Desenvolvido pelo setor de Tecnologia da Informação do HMSF</p>
+        <p class="mb-0 small">Versão 1.0.0 | Último acesso: <?php echo date('d/m/Y H:i'); ?></p>
+    </div>
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
