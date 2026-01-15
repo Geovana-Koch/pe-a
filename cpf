@@ -714,3 +714,5 @@ try {
 
 </body>
 </html>
+
+Possibilidade de adicionar treinamentos maior de 24h (Ex.: cursos que possuem 48h/360h de carga horária, atualmente conseguimos lançar apenas 24h);
