@@ -716,3 +716,10 @@ try {
 </html>
 
 Possibilidade de adicionar treinamentos maior de 24h (Ex.: cursos que possuem 48h/360h de carga horária, atualmente conseguimos lançar apenas 24h);
+
+Local para incluir quantidade prevista de capacitados por treinamentos (indicador: taxa de adesão aos treinamentos);
+
+Local para incluir pessoas terceiras (médicos, estagiários) - Rodrigo tinha falado que precisaríamos fazer uma Aba de cadastro dessas pessoas, se você tiver uma ideia de como poderíamos executar, seria bom para que contássemos certo as horas treinamento de todos.
+
+Teria a possibilidade de trocar a inclusão do profissional, em vez de CPF, ser por nome? Ex.: Escrevo Maria e aparece todas as ativas, podendo ser selecionada a correta.
+
