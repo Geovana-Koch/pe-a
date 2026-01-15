@@ -1,0 +1,1328 @@
+<?php
+date_default_timezone_set('America/Sao_Paulo');
+session_start();
+
+
+require_once 'config.php'; 
+
+
+$filtro_data_inicio = isset($_GET['data_inicio']) ? $_GET['data_inicio'] : '';
+$filtro_data_fim = isset($_GET['data_fim']) ? $_GET['data_fim'] : '';
+$filtro_tipo_atendimento = isset($_GET['tipo_atendimento']) ? $_GET['tipo_atendimento'] : '';
+$filtro_setor = isset($_GET['setor']) ? $_GET['setor'] : '';
+$filtro_tipo_usuario = isset($_GET['tipo_usuario']) ? $_GET['tipo_usuario'] : '';
+$filtro_tipo_consulta = isset($_GET['tipo_consulta']) ? $_GET['tipo_consulta'] : 'com_retorno'; 
+$filtro_contato_realizado = isset($_GET['contato_realizado']) ? $_GET['contato_realizado'] : '';
+
+
+$consulta_atual = $filtro_tipo_consulta;
+
+
+$where_conditions = [];
+$params = [];
+$types = ""; 
+
+
+if (!empty($filtro_data_inicio)) {
+    $where_conditions[] = "DATE(data_criacao) >= ?";
+    $params[] = $filtro_data_inicio;
+    $types .= "s";
+}
+
+if (!empty($filtro_data_fim)) {
+    $where_conditions[] = "DATE(data_criacao) <= ?";
+    $params[] = $filtro_data_fim;
+    $types .= "s";
+}
+
+if (!empty($filtro_tipo_atendimento)) {
+    $where_conditions[] = "tipo_atendimento = ?";
+    $params[] = $filtro_tipo_atendimento;
+    $types .= "s";
+}
+
+if (!empty($filtro_setor)) {
+    $where_conditions[] = "setor = ?";
+    $params[] = $filtro_setor;
+    $types .= "s";
+}
+
+if (!empty($filtro_tipo_usuario)) {
+    $where_conditions[] = "tipo_usuario = ?";
+    $params[] = $filtro_tipo_usuario;
+    $types .= "s";
+}
+
+if (!empty($filtro_contato_realizado)) {
+    $where_conditions[] = "contato_realizado = ?";
+    $params[] = $filtro_contato_realizado;
+    $types .= "s";
+}
+
+switch ($consulta_atual) {
+    case 'com_retorno':
+        $where_conditions[] = "identificacao = 'sim'";
+        $where_conditions[] = "deseja_retorno = 'sim'";
+        $titulo_aba = "Pessoas que desejam retorno";
+        $descricao_aba = "Identificadas que solicitaram retorno";
+        break;
+        
+    case 'sem_retorno':
+        $where_conditions[] = "identificacao = 'sim'";
+        $where_conditions[] = "deseja_retorno = 'nao'";
+        $titulo_aba = "Pessoas identificadas sem retorno";
+        $descricao_aba = "Identificadas que não solicitaram retorno";
+        break;
+        
+    case 'nao_identificadas':
+        $where_conditions[] = "identificacao = 'nao'";
+        $titulo_aba = "Pessoas não identificadas";
+        $descricao_aba = "Pesquisas anônimas";
+        break;
+        
+    default:
+        $where_conditions[] = "identificacao = 'sim'";
+        $where_conditions[] = "deseja_retorno = 'sim'";
+        $consulta_atual = 'com_retorno';
+        $titulo_aba = "Pessoas que desejam retorno";
+        $descricao_aba = "Identificadas que solicitaram retorno";
+}
+
+$where_sql = '';
+if (!empty($where_conditions)) {
+    $where_sql = "WHERE " . implode(" AND ", $where_conditions);
+}
+
+
+try {
+    $sql = "SELECT * FROM pesquisas $where_sql ORDER BY data_criacao DESC";
+    $stmt = $conexao->prepare($sql);
+    
+    if ($stmt) {
+        
+        if (!empty($params)) {
+            $stmt->bind_param($types, ...$params);
+        }
+        
+        $stmt->execute();
+        $result = $stmt->get_result();
+        $pesquisas = $result->fetch_all(MYSQLI_ASSOC);
+        $stmt->close();
+    } else {
+        throw new Exception("Erro ao preparar a consulta: " . $conexao->error);
+    }
+    
+} catch (Exception $e) {
+    $erro = "Erro ao buscar pesquisas: " . $e->getMessage();
+    $pesquisas = [];
+}
+
+
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['marcar_contato'])) {
+    $id_pesquisa = isset($_POST['id_pesquisa']) ? $_POST['id_pesquisa'] : '';
+    $contato_realizado = isset($_POST['contato_realizado']) ? $_POST['contato_realizado'] : 'nao';
+    $observacao_contato = isset($_POST['observacao_contato']) ? trim($_POST['observacao_contato']) : '';
+    
+    if (!empty($id_pesquisa)) {
+       
+        error_log("ID Pesquisa: $id_pesquisa");
+        error_log("Contato Realizado: $contato_realizado");
+        error_log("Observação: $observacao_contato");
+        
+        if ($contato_realizado == 'sim') {
+            $data_contato = date('Y-m-d H:i:s');
+            $sql_update = "UPDATE pesquisas SET contato_realizado = ?, data_contato = ?, observacao_contato = ? WHERE id = ?";
+            $stmt_update = $conexao->prepare($sql_update);
+            if ($stmt_update) {
+                $stmt_update->bind_param("sssi", $contato_realizado, $data_contato, $observacao_contato, $id_pesquisa);
+                if ($stmt_update->execute()) {
+                    $mensagem_sucesso = "Contato registrado com sucesso em " . date('d/m/Y H:i');
+                    
+                    header("Location: " . $_SERVER['PHP_SELF'] . "?" . $_SERVER['QUERY_STRING']);
+                    exit();
+                } else {
+                    $erro_atualizacao = "Erro ao atualizar contato: " . $stmt_update->error;
+                }
+                $stmt_update->close();
+            } else {
+                $erro_atualizacao = "Erro ao preparar query: " . $conexao->error;
+            }
+        } else {
+            
+            $sql_update = "UPDATE pesquisas SET contato_realizado = ?, data_contato = NULL, observacao_contato = ? WHERE id = ?";
+            $stmt_update = $conexao->prepare($sql_update);
+            if ($stmt_update) {
+                $stmt_update->bind_param("ssi", $contato_realizado, $observacao_contato, $id_pesquisa);
+                if ($stmt_update->execute()) {
+                    $mensagem_sucesso = "Status de contato atualizado para 'Pendente'";
+                    
+                    header("Location: " . $_SERVER['PHP_SELF'] . "?" . $_SERVER['QUERY_STRING']);
+                    exit();
+                } else {
+                    $erro_atualizacao = "Erro ao atualizar status: " . $stmt_update->error;
+                }
+                $stmt_update->close();
+            } else {
+                $erro_atualizacao = "Erro ao preparar query: " . $conexao->error;
+            }
+        }
+    } else {
+        $erro_atualizacao = "ID da pesquisa não especificado";
+    }
+}
+
+
+function calcularMediaNotas($pesquisa) {
+    
+    if (isset($pesquisa['tipo_atendimento']) && $pesquisa['tipo_atendimento'] == 'administrativo') {
+        
+        $campos_notas = ['administrativo', 'recomendacao'];
+    } else {
+        
+        $campos_notas = [
+            'recepcao', 'enfermagem', 'medico', 'nutricao', 'hotelaria',
+            'fisioterapia', 'exames_laboratoriais', 'exames_imagem',
+            'psicologia_servico_social', 'recomendacao', 'centro_diagnostico',
+            'centro_cirurgico'
+        ];
+    }
+    
+    $soma = 0;
+    $contador = 0;
+    
+    foreach ($campos_notas as $campo) {
+        if (isset($pesquisa[$campo]) && is_numeric($pesquisa[$campo]) && $pesquisa[$campo] <= 10) {
+            $soma += $pesquisa[$campo];
+            $contador++;
+        }
+    }
+    
+    return $contador > 0 ? round($soma / $contador, 1) : 0;
+}
+
+
+function getRatingColor($number) {
+    if ($number === 11) return '#6c757d';
+    
+    $ratio = $number / 10;
+
+    if ($ratio <= 0.5) {
+        $red = 255;
+        $green = round(255 * ($ratio * 2));
+        $blue = 0;
+    } else {
+        $adjustedRatio = ($ratio - 0.5) * 2;
+        if ($number <= 8) {
+            $red = round(255 * (1 - $adjustedRatio * 0.2));
+        } else {
+            $red = round(255 * (1 - $adjustedRatio));
+        }
+        $green = 255;
+        $blue = 0;
+    }
+
+    return sprintf("#%02x%02x%02x", $red, $green, $blue);
+}
+
+
+if (isset($_GET['exportar']) && $_GET['exportar'] == 'excel') {
+    header('Content-Type: application/vnd.ms-excel');
+    header('Content-Disposition: attachment; filename="consultapesquisas_' . date('Y-m-d') . '.xls"');
+    
+    echo "<table border='1'>";
+    echo "<tr>
+            <th>ID</th>
+            <th>Data</th>
+            <th>Tipo Atendimento</th>
+            <th>Setor</th>
+            <th>Tipo Usuário</th>
+            <th>Nome</th>
+            <th>Contato</th>
+            <th>Email</th>
+            <th>Recepção</th>
+            <th>Enfermagem</th>
+            <th>Médico</th>
+            <th>Nutrição</th>
+            <th>Hotelaria</th>
+            <th>Fisioterapia</th>
+            <th>Exames</th>
+            <th>Recomendação</th>
+            <th>Média</th>
+            <th>Contato Realizado</th>
+            <th>Data Contato</th>
+            <th>Observação Contato</th>
+            <th>Comentário</th>
+          </tr>";
+    
+    foreach ($pesquisas as $pesquisa) {
+        $media = calcularMediaNotas($pesquisa);
+        $data_contato_formatada = '';
+        if (!empty($pesquisa['data_contato'])) {
+            $data_contato_formatada = date('d/m/Y H:i', strtotime($pesquisa['data_contato']));
+        }
+        echo "<tr>
+                <td>{$pesquisa['id']}</td>
+                <td>" . date('d/m/Y H:i', strtotime($pesquisa['data_criacao'])) . "</td>
+                <td>{$pesquisa['tipo_atendimento']}</td>
+                <td>" . ($pesquisa['tipo_atendimento'] == 'assistencial' ? (isset($pesquisa['setor']) ? $pesquisa['setor'] : '') : (isset($pesquisa['setor_administrativo']) ? $pesquisa['setor_administrativo'] : '')) . "</td>
+                <td>{$pesquisa['tipo_usuario']}</td>
+                <td>{$pesquisa['nome']}</td>
+                <td>{$pesquisa['contato']}</td>
+                <td>{$pesquisa['email']}</td>
+                <td>" . (isset($pesquisa['recepcao']) ? $pesquisa['recepcao'] : 'N/A') . "</td>
+                <td>" . (isset($pesquisa['enfermagem']) ? $pesquisa['enfermagem'] : 'N/A') . "</td>
+                <td>" . (isset($pesquisa['medico']) ? $pesquisa['medico'] : 'N/A') . "</td>
+                <td>" . (isset($pesquisa['nutricao']) ? $pesquisa['nutricao'] : 'N/A') . "</td>
+                <td>" . (isset($pesquisa['hotelaria']) ? $pesquisa['hotelaria'] : 'N/A') . "</td>
+                <td>" . (isset($pesquisa['fisioterapia']) ? $pesquisa['fisioterapia'] : 'N/A') . "</td>
+                <td>" . (isset($pesquisa['exames_laboratoriais']) ? $pesquisa['exames_laboratoriais'] : 'N/A') . "</td>
+                <td>{$pesquisa['recomendacao']}</td>
+                <td>{$media}</td>
+                <td>" . (isset($pesquisa['contato_realizado']) ? $pesquisa['contato_realizado'] : 'nao') . "</td>
+                <td>{$data_contato_formatada}</td>
+                <td>" . (isset($pesquisa['observacao_contato']) ? $pesquisa['observacao_contato'] : '') . "</td>
+                <td>" . substr(isset($pesquisa['comentario']) ? $pesquisa['comentario'] : '', 0, 100) . "...</td>
+              </tr>";
+    }
+    
+    echo "</table>";
+    exit;
+}
+?>
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Consulta de Pesquisas - Hospital Sagrada Família</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+    <style>
+        :root {
+            --primary-color: #7d1700;
+            --secondary-color: #1e4080;
+            --light-color: #EFEBE4;
+        }
+        
+        body {
+            background-color: #f8f9fa;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            padding-bottom: 60px;
+        }
+        
+        .navbar {
+            background-color: var(--primary-color) !important;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+        
+        .navbar-brand {
+            font-weight: 600;
+        }
+        
+        .card {
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+            margin-bottom: 20px;
+            border: none;
+        }
+        
+        .card-header {
+            background-color: var(--primary-color);
+            color: white;
+            border-radius: 10px 10px 0 0 !important;
+            padding: 15px 20px;
+        }
+        
+        .btn-primary {
+            background-color: var(--primary-color);
+            border-color: var(--primary-color);
+        }
+        
+        .btn-primary:hover {
+            background-color: #5a1100;
+            border-color: #5a1100;
+        }
+        
+        .btn-secondary {
+            background-color: var(--secondary-color);
+            border-color: var(--secondary-color);
+        }
+        
+        .btn-secondary:hover {
+            background-color: #163060;
+            border-color: #163060;
+        }
+        
+        .table th {
+            background-color: var(--light-color);
+        }
+        
+        .badge-nota {
+            width: 30px;
+            height: 30px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 50%;
+            color: white;
+            font-weight: bold;
+            font-size: 0.9em;
+        }
+        
+        .nav-tabs .nav-link {
+            color: #495057;
+            font-weight: 500;
+        }
+        
+        .nav-tabs .nav-link.active {
+            background-color: var(--primary-color);
+            color: white;
+            border-color: var(--primary-color);
+        }
+        
+        .nav-tabs .nav-link:hover:not(.active) {
+            border-color: #dee2e6 #dee2e6 var(--primary-color);
+            color: var(--primary-color);
+        }
+        
+        footer {
+            position: fixed;
+            bottom: 0;
+            width: 100%;
+            padding: 1rem 0;
+            background-color: var(--primary-color);
+            color: white;
+            text-align: center;
+        }
+        
+        .export-btn {
+            transition: all 0.3s;
+        }
+        
+        .export-btn:hover {
+            transform: scale(1.05);
+        }
+        
+        .resumo-item {
+            background-color: #f8f9fa;
+            padding: 10px;
+            border-radius: 5px;
+            margin-bottom: 10px;
+            border-left: 4px solid var(--primary-color);
+        }
+        
+        .accordion-button:not(.collapsed) {
+            background-color: rgba(125, 23, 0, 0.1);
+            color: var(--primary-color);
+        }
+        
+        .media-nota {
+            font-size: 1.2em;
+            font-weight: bold;
+            padding: 5px 15px;
+            border-radius: 20px;
+            display: inline-block;
+        }
+        
+        .contato-info {
+            background-color: #e8f4f8;
+            padding: 10px;
+            border-radius: 5px;
+            margin-top: 10px;
+            border-left: 3px solid var(--secondary-color);
+        }
+        
+        .badge-contato {
+            font-size: 0.8em;
+            padding: 4px 8px;
+        }
+        
+        .btn-contato {
+            padding: 2px 6px;
+            font-size: 0.8em;
+        }
+        
+        
+        .tr-contatado {
+            background-color: #e8f5e8 !important;
+            border-left: 4px solid #28a745;
+        }
+        
+        .tr-contatado:hover {
+            background-color: #d4edda !important;
+        }
+        
+        .icone-contatado {
+            color: #28a745;
+            font-size: 1.2em;
+        }
+        
+        .badge-contatado {
+            background-color: #28a745;
+            color: white;
+            font-weight: bold;
+            padding: 5px 10px;
+            border-radius: 20px;
+        }
+        
+        .status-contato {
+            font-weight: bold;
+            font-size: 0.9em;
+        }
+        
+        .data-contato {
+            font-size: 0.8em;
+            color: #666;
+        }
+        
+        
+        .nps-score {
+            font-size: 1.5em;
+            font-weight: bold;
+            padding: 8px 15px;
+            border-radius: 20px;
+            display: inline-block;
+            margin-top: 5px;
+        }
+        
+        .nps-positive {
+            background-color: #28a745;
+            color: white;
+        }
+        
+        .nps-neutral {
+            background-color: #ffc107;
+            color: #212529;
+        }
+        
+        .nps-negative {
+            background-color: #dc3545;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+
+<nav class="navbar navbar-expand-lg navbar-dark mb-4">
+    <div class="container">
+        <a class="navbar-brand d-flex align-items-center" href="#">
+            <i class="bi bi-heart-pulse me-2"></i>
+            Hospital Sagrada Família - Consulta de Pesquisas
+        </a>
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+            <span class="navbar-toggler-icon"></span>
+        </button>
+        <div class="collapse navbar-collapse" id="navbarNav">
+            <ul class="navbar-nav ms-auto">
+                <li class="nav-item">
+                    <a class="nav-link" href="index.php"><i class="bi bi-house-door me-1"></i>Voltar à Pesquisa</a>
+                </li>
+            </ul>
+        </div>
+    </div>
+</nav>
+
+<div class="container mb-5">
+    <div class="row justify-content-center">
+        <div class="col-lg-12">
+            <?php if (isset($erro)): ?>
+                <div class="alert alert-danger">
+                    <i class="bi bi-exclamation-triangle me-2"></i><?php echo $erro; ?>
+                </div>
+            <?php endif; ?>
+            
+            <?php if (isset($erro_atualizacao)): ?>
+                <div class="alert alert-danger">
+                    <i class="bi bi-exclamation-triangle me-2"></i><?php echo $erro_atualizacao; ?>
+                </div>
+            <?php endif; ?>
+            
+            <?php if (isset($mensagem_sucesso)): ?>
+                <div class="alert alert-success alert-dismissible fade show">
+                    <i class="bi bi-check-circle me-2"></i><?php echo $mensagem_sucesso; ?>
+                    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                </div>
+            <?php endif; ?>
+            
+            <?php if (!isset($conexao) || !$conexao): ?>
+                <div class="alert alert-warning">
+                    <i class="bi bi-exclamation-triangle me-2"></i>Não foi possível conectar ao banco de dados. Verifique as credenciais no arquivo config.php
+                </div>
+            <?php endif; ?>
+            
+            <div class="card">
+                <div class="card-header">
+                    <h1 class="h4 mb-0">Consulta de Pesquisas de Satisfação</h1>
+                </div>
+                <div class="card-body">
+                    
+                    <ul class="nav nav-tabs mb-4" id="abaConsulta">
+                        <li class="nav-item">
+                            <a class="nav-link <?php echo $consulta_atual == 'com_retorno' ? 'active' : ''; ?>" 
+                               href="?tipo_consulta=com_retorno<?php echo !empty($filtro_data_inicio) ? '&data_inicio=' . $filtro_data_inicio : ''; ?><?php echo !empty($filtro_data_fim) ? '&data_fim=' . $filtro_data_fim : ''; ?>">
+                                <i class="bi bi-telephone-forward me-1"></i>Com Retorno
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link <?php echo $consulta_atual == 'sem_retorno' ? 'active' : ''; ?>" 
+                               href="?tipo_consulta=sem_retorno<?php echo !empty($filtro_data_inicio) ? '&data_inicio=' . $filtro_data_inicio : ''; ?><?php echo !empty($filtro_data_fim) ? '&data_fim=' . $filtro_data_fim : ''; ?>">
+                                <i class="bi bi-person-check me-1"></i>Identificadas Sem Retorno
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link <?php echo $consulta_atual == 'nao_identificadas' ? 'active' : ''; ?>" 
+                               href="?tipo_consulta=nao_identificadas<?php echo !empty($filtro_data_inicio) ? '&data_inicio=' . $filtro_data_inicio : ''; ?><?php echo !empty($filtro_data_fim) ? '&data_fim=' . $filtro_data_fim : ''; ?>">
+                                <i class="bi bi-person-x me-1"></i>Não Identificadas
+                            </a>
+                        </li>
+                    </ul>
+                    
+                   
+                    <div class="alert alert-info mb-4">
+                        <h5 class="alert-heading"><i class="bi bi-info-circle me-2"></i><?php echo $titulo_aba; ?></h5>
+                        <p class="mb-0"><?php echo $descricao_aba; ?></p>
+                        <?php if (isset($pesquisas) && count($pesquisas) > 0): ?>
+                            <p class="mb-0 mt-2">
+                                <strong>Total encontrado:</strong> <?php echo count($pesquisas); ?> pesquisa(s) | 
+                                <strong>Com contato:</strong> <?php 
+                                    $com_contato = 0;
+                                    foreach ($pesquisas as $p) {
+                                        if (isset($p['contato_realizado']) && $p['contato_realizado'] == 'sim') {
+                                            $com_contato++;
+                                        }
+                                    }
+                                    echo $com_contato;
+                                ?> | 
+                                <strong>Sem contato:</strong> <?php echo count($pesquisas) - $com_contato; ?>
+                            </p>
+                        <?php endif; ?>
+                    </div>
+                    
+                    
+                    <form method="get" action="">
+                        <input type="hidden" name="tipo_consulta" value="<?php echo $consulta_atual; ?>">
+                        
+                        <div class="row mb-4">
+                            <div class="col-md-3">
+                                <label for="data_inicio" class="form-label">Data Início</label>
+                                <input type="date" class="form-control" id="data_inicio" name="data_inicio" value="<?php echo $filtro_data_inicio; ?>">
+                            </div>
+                            <div class="col-md-3">
+                                <label for="data_fim" class="form-label">Data Fim</label>
+                                <input type="date" class="form-control" id="data_fim" name="data_fim" value="<?php echo $filtro_data_fim; ?>">
+                            </div>
+                            <div class="col-md-2">
+                                <label for="tipo_atendimento" class="form-label">Tipo Atendimento</label>
+                                <select class="form-control" id="tipo_atendimento" name="tipo_atendimento">
+                                    <option value="">Todos</option>
+                                    <option value="assistencial" <?php echo $filtro_tipo_atendimento == 'assistencial' ? 'selected' : ''; ?>>Assistencial</option>
+                                    <option value="administrativo" <?php echo $filtro_tipo_atendimento == 'administrativo' ? 'selected' : ''; ?>>Administrativo</option>
+                                </select>
+                            </div>
+                            <div class="col-md-2">
+                                <label for="tipo_usuario" class="form-label">Tipo de Usuário</label>
+                                <select class="form-control" id="tipo_usuario" name="tipo_usuario">
+                                    <option value="">Todos</option>
+                                    <option value="Paciente" <?php echo $filtro_tipo_usuario == 'Paciente' ? 'selected' : ''; ?>>Paciente</option>
+                                    <option value="Acompanhante" <?php echo $filtro_tipo_usuario == 'Acompanhante' ? 'selected' : ''; ?>>Acompanhante</option>
+                                    <option value="Visitante" <?php echo $filtro_tipo_usuario == 'Visitante' ? 'selected' : ''; ?>>Visitante</option>
+                                    <option value="Colaborador" <?php echo $filtro_tipo_usuario == 'Colaborador' ? 'selected' : ''; ?>>Colaborador</option>
+                                </select>
+                            </div>
+                            
+                            <div class="col-md-2">
+                                <label for="contato_realizado" class="form-label">Status Contato</label>
+                                <select class="form-control" id="contato_realizado" name="contato_realizado">
+                                    <option value="">Todos</option>
+                                    <option value="sim" <?php echo $filtro_contato_realizado == 'sim' ? 'selected' : ''; ?>>Com contato</option>
+                                    <option value="nao" <?php echo $filtro_contato_realizado == 'nao' ? 'selected' : ''; ?>>Sem contato</option>
+                                </select>
+                            </div>
+                            
+                            <div class="col-md-3 mt-3">
+                                <label for="setor" class="form-label">Setor</label>
+                                <select class="form-control" id="setor" name="setor">
+                                    <option value="">Todos</option>
+                                    <option value="Urgência e Emergência">Urgência e Emergência</option>
+                                    <option value="Pronto Atendimento/PA">Pronto Atendimento/PA</option>
+                                    <option value="Oncologia">Oncologia</option>
+                                    <option value="Maternidade">Maternidade</option>
+                                    <option value="UTI">UTI</option>
+                                    <option value="Ala Bom Pastor">Ala Bom Pastor</option>
+                                    <option value="Ala São José">Ala São José</option>
+                                    <option value="Ala São Bento">Ala São Bento</option>
+                                    <option value="Centro de Especialidades">Centro de Especialidades</option>
+                                    <option value="Centro de Diagnóstico">Centro de Diagnóstico</option>
+                                </select>
+                            </div>
+                            
+                            <div class="col-md-12 mt-3">
+                                <button type="submit" class="btn btn-primary me-2">
+                                    <i class="bi bi-search me-1"></i>Filtrar
+                                </button>
+                                <a href="consulta_pesquisas.php?tipo_consulta=<?php echo $consulta_atual; ?>" class="btn btn-secondary me-2">
+                                    <i class="bi bi-x-circle me-1"></i>Limpar Filtros
+                                </a>
+                                <?php if (isset($pesquisas) && count($pesquisas) > 0): ?>
+                                <button type="submit" name="exportar" value="excel" class="btn btn-success export-btn">
+                                    <i class="bi bi-file-earmark-excel me-1"></i>Exportar para Excel
+                                </button>
+                                <?php endif; ?>
+                            </div>
+                        </div>
+                    </form>
+                    
+                   
+                    <?php if (isset($pesquisas) && count($pesquisas) > 0): ?>
+                    <div class="card mb-4">
+                        <div class="card-header bg-secondary text-white">
+                            <h5 class="mb-0"><i class="bi bi-graph-up me-2"></i>Resumo Estatístico</h5>
+                        </div>
+                        <div class="card-body">
+                            <div class="row">
+                                <div class="col-md-2">
+                                    <div class="text-center">
+                                        <h3 class="text-primary"><?php echo count($pesquisas); ?></h3>
+                                        <p class="text-muted mb-0">Total de Pesquisas</p>
+                                    </div>
+                                </div>
+                                <div class="col-md-2">
+                                    <div class="text-center">
+                                        <?php
+                                        $medias = array_map('calcularMediaNotas', $pesquisas);
+                                        $media_geral = count($medias) > 0 ? round(array_sum($medias) / count($medias), 1) : 0;
+                                        $cor_media = getRatingColor(round($media_geral));
+                                        ?>
+                                        <h3 style="color: <?php echo $cor_media; ?>"><?php echo $media_geral; ?>/10</h3>
+                                        <p class="text-muted mb-0">Média Geral</p>
+                                    </div>
+                                </div>
+                                <div class="col-md-2">
+                                    <div class="text-center">
+                                        <?php
+                                        $recomendacoes = array_column($pesquisas, 'recomendacao');
+                                        $media_recomendacao = count($recomendacoes) > 0 ? round(array_sum($recomendacoes) / count($recomendacoes), 1) : 0;
+                                        $cor_recomendacao = getRatingColor(round($media_recomendacao));
+                                        ?>
+                                        <h3 style="color: <?php echo $cor_recomendacao; ?>"><?php echo $media_recomendacao; ?>/10</h3>
+                                        <p class="text-muted mb-0">Média Recomendação</p>
+                                    </div>
+                                </div>
+                                <div class="col-md-3">
+                                    <div class="text-center">
+                                        <?php
+                                        
+                                        $promotores = 0;
+                                        $neutros = 0;
+                                        $detratores = 0;
+                                        $total_nps = 0;
+                                        
+                                        foreach ($pesquisas as $p) {
+                                            if (isset($p['recomendacao']) && is_numeric($p['recomendacao'])) {
+                                                $total_nps++;
+                                                if ($p['recomendacao'] >= 9) {
+                                                    $promotores++;
+                                                } elseif ($p['recomendacao'] <= 6) {
+                                                    $detratores++;
+                                                } else {
+                                                    $neutros++;
+                                                }
+                                            }
+                                        }
+                                        
+                                        $nps = 0;
+                                        if ($total_nps > 0) {
+                                            $nps = round((($promotores / $total_nps) - ($detratores / $total_nps)) * 100);
+                                        }
+                                        
+                                        
+                                        $nps_class = 'nps-neutral';
+                                        if ($nps >= 50) {
+                                            $nps_class = 'nps-positive';
+                                        } elseif ($nps < 0) {
+                                            $nps_class = 'nps-negative';
+                                        }
+                                        ?>
+                                        <div class="nps-score <?php echo $nps_class; ?>">
+                                            NPS: <?php echo $nps; ?>
+                                        </div>
+                                        <p class="text-muted mb-0 mt-2">Net Promoter Score</p>
+                                        <small class="text-muted">
+                                            P: <?php echo $promotores; ?> | 
+                                            N: <?php echo $neutros; ?> | 
+                                            D: <?php echo $detratores; ?>
+                                        </small>
+                                    </div>
+                                </div>
+                                <div class="col-md-3">
+                                    <div class="text-center">
+                                        <?php
+                                        $atendimento_assistencial = 0;
+                                        $atendimento_administrativo = 0;
+                                        foreach ($pesquisas as $p) {
+                                            if (isset($p['tipo_atendimento']) && $p['tipo_atendimento'] == 'assistencial') {
+                                                $atendimento_assistencial++;
+                                            } elseif (isset($p['tipo_atendimento']) && $p['tipo_atendimento'] == 'administrativo') {
+                                                $atendimento_administrativo++;
+                                            }
+                                        }
+                                        $total_tipos = $atendimento_assistencial + $atendimento_administrativo;
+                                        $percentual_assistencial = $total_tipos > 0 ? round(($atendimento_assistencial / $total_tipos) * 100) : 0;
+                                        $percentual_administrativo = $total_tipos > 0 ? round(($atendimento_administrativo / $total_tipos) * 100) : 0;
+                                        ?>
+                                        <h4 class="text-info"><?php echo $percentual_assistencial; ?>%</h4>
+                                        <p class="text-muted mb-0 small">Assistencial (<?php echo $atendimento_assistencial; ?>)</p>
+                                        <h4 class="text-warning"><?php echo $percentual_administrativo; ?>%</h4>
+                                        <p class="text-muted mb-0 small">Administrativo (<?php echo $atendimento_administrativo; ?>)</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <?php endif; ?>
+                    
+                   
+                    <?php if (isset($pesquisas)): ?>
+                    <div class="table-responsive">
+                        <table class="table table-hover" id="tabela-pesquisas">
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Data/Hora</th>
+                                    <?php if ($consulta_atual != 'nao_identificadas'): ?>
+                                    <th>Identificação</th>
+                                    <?php endif; ?>
+                                    <th>Tipo Atendimento</th>
+                                    <th>Setor</th>
+                                    <?php if ($consulta_atual != 'nao_identificadas'): ?>
+                                    <th>Contato</th>
+                                    <?php endif; ?>
+                                    <th>Notas</th>
+                                    <th>Média</th>
+                                    <th>Recomendação</th>
+                                    <th>Status Contato</th>
+                                    <th>Ações</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php if (count($pesquisas) > 0): ?>
+                                    <?php foreach ($pesquisas as $pesquisa): 
+                                        $media = calcularMediaNotas($pesquisa);
+                                        $cor_media = getRatingColor(round($media));
+                                        $cor_recomendacao = getRatingColor($pesquisa['recomendacao']);
+                                        $setor_display = '';
+                                        if ($pesquisa['tipo_atendimento'] == 'assistencial') {
+                                            $setor_display = isset($pesquisa['setor']) ? $pesquisa['setor'] : '';
+                                        } else {
+                                            $setor_display = isset($pesquisa['setor_administrativo']) ? $pesquisa['setor_administrativo'] : '';
+                                        }
+                                        $isAdministrativo = (isset($pesquisa['tipo_atendimento']) && $pesquisa['tipo_atendimento'] == 'administrativo');
+                                        $contato_realizado = isset($pesquisa['contato_realizado']) ? $pesquisa['contato_realizado'] : 'nao';
+                                        $data_contato = isset($pesquisa['data_contato']) ? $pesquisa['data_contato'] : '';
+                                        $observacao_contato = isset($pesquisa['observacao_contato']) ? $pesquisa['observacao_contato'] : '';
+                                    ?>
+                                    <tr class="<?php echo $contato_realizado == 'sim' ? 'tr-contatado' : ''; ?>">
+                                        <td>
+                                            <?php if ($contato_realizado == 'sim'): ?>
+                                                <i class="bi bi-check-circle-fill icone-contatado me-1"></i>
+                                            <?php endif; ?>
+                                            <?php echo $pesquisa['id']; ?>
+                                        </td>
+                                        <td><?php echo date('d/m/Y H:i', strtotime($pesquisa['data_criacao'])); ?></td>
+                                        
+                                        <?php if ($consulta_atual != 'nao_identificadas'): ?>
+                                        <td>
+                                            <strong><?php echo htmlspecialchars(isset($pesquisa['nome']) ? $pesquisa['nome'] : ''); ?></strong><br>
+                                            <small><?php echo htmlspecialchars(isset($pesquisa['tipo_usuario']) ? $pesquisa['tipo_usuario'] : ''); ?><?php echo !empty($pesquisa['idade']) ? ' - ' . htmlspecialchars($pesquisa['idade']) . ' anos' : ''; ?></small>
+                                        </td>
+                                        <?php endif; ?>
+                                        
+                                        <td>
+                                            <span class="badge <?php echo $isAdministrativo ? 'bg-warning' : 'bg-info'; ?>">
+                                                <?php echo $isAdministrativo ? 'Administrativo' : 'Assistencial'; ?>
+                                            </span>
+                                        </td>
+                                        <td><?php echo htmlspecialchars($setor_display); ?></td>
+                                        
+                                        <?php if ($consulta_atual != 'nao_identificadas'): ?>
+                                        <td>
+                                            <?php if (!empty($pesquisa['contato'])): ?>
+                                                <div><?php echo htmlspecialchars($pesquisa['contato']); ?></div>
+                                            <?php endif; ?>
+                                            <?php if (!empty($pesquisa['email'])): ?>
+                                                <div><small><?php echo htmlspecialchars($pesquisa['email']); ?></small></div>
+                                            <?php endif; ?>
+                                            <?php if ($consulta_atual == 'com_retorno'): ?>
+                                                <span class="badge bg-success">Deseja retorno</span>
+                                            <?php endif; ?>
+                                        </td>
+                                        <?php endif; ?>
+                                        
+                                        <td>
+                                            <?php if ($isAdministrativo): ?>
+                                                
+                                                <span class="badge-nota" style="background-color: <?php echo getRatingColor($pesquisa['administrativo']); ?>" title="Serviço Administrativo">
+                                                    <?php echo isset($pesquisa['administrativo']) && $pesquisa['administrativo'] <= 10 ? $pesquisa['administrativo'] : 'N/A'; ?>
+                                                </span>
+                                            <?php else: ?>
+                                                
+                                                <span class="badge-nota" style="background-color: <?php echo getRatingColor($pesquisa['recepcao']); ?>" title="Recepção">
+                                                    <?php echo isset($pesquisa['recepcao']) && $pesquisa['recepcao'] <= 10 ? $pesquisa['recepcao'] : 'N/A'; ?>
+                                                </span>
+                                                <span class="badge-nota" style="background-color: <?php echo getRatingColor($pesquisa['enfermagem']); ?>" title="Enfermagem">
+                                                    <?php echo isset($pesquisa['enfermagem']) && $pesquisa['enfermagem'] <= 10 ? $pesquisa['enfermagem'] : 'N/A'; ?>
+                                                </span>
+                                                <span class="badge-nota" style="background-color: <?php echo getRatingColor($pesquisa['medico']); ?>" title="Médico">
+                                                    <?php echo isset($pesquisa['medico']) && $pesquisa['medico'] <= 10 ? $pesquisa['medico'] : 'N/A'; ?>
+                                                </span>
+                                            <?php endif; ?>
+                                        </td>
+                                        
+                                        <td>
+                                            <span class="media-nota" style="background-color: <?php echo $cor_media; ?>; color: white;">
+                                                <?php echo $media; ?>
+                                            </span>
+                                        </td>
+                                        
+                                        <td>
+                                            <span class="badge-nota" style="background-color: <?php echo $cor_recomendacao; ?>">
+                                                <?php echo $pesquisa['recomendacao']; ?>
+                                            </span>
+                                        </td>
+                                        
+                                        <td>
+                                            <?php if ($contato_realizado == 'sim'): ?>
+                                                <div class="status-contato text-success">
+                                                    <i class="bi bi-telephone-inbound"></i> CONTATADO
+                                                </div>
+                                                <?php if (!empty($data_contato)): ?>
+                                                    <div class="data-contato">
+                                                        <?php echo date('d/m/Y H:i', strtotime($data_contato)); ?>
+                                                    </div>
+                                                <?php endif; ?>
+                                                <?php if (!empty($observacao_contato)): ?>
+                                                    <div class="observacao-contato small text-muted mt-1" title="<?php echo htmlspecialchars($observacao_contato); ?>">
+                                                        <i class="bi bi-chat-left-text"></i> <?php echo substr($observacao_contato, 0, 20); ?>...
+                                                    </div>
+                                                <?php endif; ?>
+                                            <?php else: ?>
+                                                <div class="status-contato text-secondary">
+                                                    <i class="bi bi-telephone-x"></i> PENDENTE
+                                                </div>
+                                            <?php endif; ?>
+                                        </td>
+                                        
+                                        <td>
+                                            <button class="btn btn-sm btn-info" type="button" data-bs-toggle="collapse" 
+                                                    data-bs-target="#detalhes<?php echo $pesquisa['id']; ?>" 
+                                                    aria-expanded="false" title="Ver detalhes">
+                                                <i class="bi bi-eye"></i>
+                                            </button>
+                                            <button type="button" class="btn btn-sm <?php echo $contato_realizado == 'sim' ? 'btn-success' : 'btn-outline-success'; ?> btn-contato"
+                                                    data-bs-toggle="modal" data-bs-target="#modalContato<?php echo $pesquisa['id']; ?>" title="Marcar contato">
+                                                <i class="bi bi-telephone"></i>
+                                            </button>
+                                        </td>
+                                    </tr>
+                                    
+                                   
+                                    <div class="modal fade" id="modalContato<?php echo $pesquisa['id']; ?>" tabindex="-1" aria-hidden="true">
+                                        <div class="modal-dialog">
+                                            <div class="modal-content">
+                                                <form method="post" action="">
+                                                    <input type="hidden" name="id_pesquisa" value="<?php echo $pesquisa['id']; ?>">
+                                                    <div class="modal-header">
+                                                        <h5 class="modal-title">
+                                                            <i class="bi bi-telephone me-2"></i>
+                                                            Registrar Contato - ID: <?php echo $pesquisa['id']; ?>
+                                                        </h5>
+                                                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                                                    </div>
+                                                    <div class="modal-body">
+                                                        <div class="alert alert-light mb-3">
+                                                            <p class="mb-1"><strong>Pessoa:</strong> <?php echo htmlspecialchars(isset($pesquisa['nome']) ? $pesquisa['nome'] : 'Não identificado'); ?></p>
+                                                            <p class="mb-1"><strong>Contato:</strong> <?php echo htmlspecialchars(isset($pesquisa['contato']) ? $pesquisa['contato'] : 'Não informado'); ?></p>
+                                                            <p class="mb-0"><strong>Email:</strong> <?php echo htmlspecialchars(isset($pesquisa['email']) ? $pesquisa['email'] : 'Não informado'); ?></p>
+                                                        </div>
+                                                        
+                                                        <div class="mb-3">
+                                                            <label class="form-label"><strong>Status do Contato</strong></label>
+                                                            <div class="form-check">
+                                                                <input class="form-check-input" type="radio" name="contato_realizado" id="contato_sim<?php echo $pesquisa['id']; ?>" value="sim" <?php echo $contato_realizado == 'sim' ? 'checked' : ''; ?>>
+                                                                <label class="form-check-label" for="contato_sim<?php echo $pesquisa['id']; ?>">
+                                                                    <i class="bi bi-check-circle-fill text-success me-1"></i> Contato realizado
+                                                                </label>
+                                                                <div class="form-text">Data será registrada automaticamente: <?php echo date('d/m/Y H:i'); ?></div>
+                                                            </div>
+                                                            <div class="form-check mt-2">
+                                                                <input class="form-check-input" type="radio" name="contato_realizado" id="contato_nao<?php echo $pesquisa['id']; ?>" value="nao" <?php echo $contato_realizado != 'sim' ? 'checked' : ''; ?>>
+                                                                <label class="form-check-label" for="contato_nao<?php echo $pesquisa['id']; ?>">
+                                                                    <i class="bi bi-x-circle-fill text-secondary me-1"></i> Pendente / Cancelar contato
+                                                                </label>
+                                                                <div class="form-text">Data do contato será removida</div>
+                                                            </div>
+                                                        </div>
+                                                        
+                                                        <div class="mb-3">
+                                                            <label for="observacao_contato<?php echo $pesquisa['id']; ?>" class="form-label"><strong>Observações do Contato</strong></label>
+                                                            <textarea class="form-control" id="observacao_contato<?php echo $pesquisa['id']; ?>" name="observacao_contato" rows="4" placeholder="Ex: 
+• Ligou 2x, não atendeu
+• Retornou satisfeito com o atendimento
+• Solicitou mais informações sobre...
+• Agradeceu pelo cuidado
+• Reclamou sobre..."><?php echo htmlspecialchars($observacao_contato); ?></textarea>
+                                                            <div class="form-text">Informações importantes sobre o contato realizado</div>
+                                                        </div>
+                                                        
+                                                        <?php if ($contato_realizado == 'sim' && !empty($data_contato)): ?>
+                                                        <div class="alert alert-info">
+                                                            <i class="bi bi-info-circle me-1"></i>
+                                                            Último contato registrado em: <?php echo date('d/m/Y H:i', strtotime($data_contato)); ?>
+                                                        </div>
+                                                        <?php endif; ?>
+                                                    </div>
+                                                    <div class="modal-footer">
+                                                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+                                                        <button type="submit" name="marcar_contato" value="1" class="btn btn-primary">
+                                                            <i class="bi bi-save me-1"></i> Salvar Contato
+                                                        </button>
+                                                    </div>
+                                                </form>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    
+                                    
+                                    <tr class="collapse-row">
+                                        <td colspan="11" class="p-0 border-0">
+                                            <div class="collapse" id="detalhes<?php echo $pesquisa['id']; ?>">
+                                                <div class="card card-body">
+                                                    <div class="row">
+                                                        <div class="col-md-6">
+                                                            <h6><i class="bi bi-clipboard-data me-2"></i>Resumo Completo</h6>
+                                                            <div class="resumo-item">
+                                                                <strong>Tipo de Atendimento:</strong> 
+                                                                <?php echo $isAdministrativo ? 'Administrativo' : 'Assistencial'; ?>
+                                                            </div>
+                                                            
+                                                            <?php if (!$isAdministrativo && !empty($pesquisa['atendimendo_recep'])): ?>
+                                                            <div class="resumo-item">
+                                                                <strong>Recepção Atendida:</strong> 
+                                                                <?php echo htmlspecialchars($pesquisa['atendimendo_recep']); ?>
+                                                            </div>
+                                                            <?php endif; ?>
+                                                            
+                                                            <div class="resumo-item">
+                                                                <strong>Setor:</strong> 
+                                                                <?php echo htmlspecialchars($setor_display); ?>
+                                                            </div>
+                                                            
+                                                            <?php if ($consulta_atual != 'nao_identificadas' && !empty($pesquisa['tipo_usuario'])): ?>
+                                                            <div class="resumo-item">
+                                                                <strong>Tipo de Usuário:</strong> 
+                                                                <?php echo htmlspecialchars($pesquisa['tipo_usuario']); ?>
+                                                            </div>
+                                                            <?php endif; ?>
+                                                            
+                                                          
+                                                            <div class="resumo-item">
+                                                                <strong>Status de Contato:</strong> 
+                                                                <?php if ($contato_realizado == 'sim'): ?>
+                                                                    <span class="badge bg-success">CONTATADO</span>
+                                                                    <?php if (!empty($data_contato)): ?>
+                                                                        <br><small>Data do contato: <?php echo date('d/m/Y H:i', strtotime($data_contato)); ?></small>
+                                                                    <?php endif; ?>
+                                                                    <?php if (!empty($observacao_contato)): ?>
+                                                                        <br><small>Observação: <?php echo nl2br(htmlspecialchars($observacao_contato)); ?></small>
+                                                                    <?php endif; ?>
+                                                                <?php else: ?>
+                                                                    <span class="badge bg-secondary">PENDENTE</span>
+                                                                <?php endif; ?>
+                                                            </div>
+                                                            
+                                                            <?php if (!empty($pesquisa['comentario_profissional'])): ?>
+                                                            <div class="resumo-item">
+                                                                <strong>Profissional Destacado:</strong><br>
+                                                                <?php echo nl2br(htmlspecialchars($pesquisa['comentario_profissional'])); ?>
+                                                            </div>
+                                                            <?php endif; ?>
+                                                            
+                                                            <?php if (!empty($pesquisa['comentario_negativo'])): ?>
+                                                            <div class="resumo-item">
+                                                                <strong>Profissional com atendimento abaixo das expectativas:</strong><br>
+                                                                <?php echo nl2br(htmlspecialchars($pesquisa['comentario_negativo'])); ?>
+                                                            </div>
+                                                            <?php endif; ?>
+                                                        </div>
+                                                        
+                                                        <div class="col-md-6">
+                                                            <h6><i class="bi bi-star me-2"></i>Todas as Notas</h6>
+                                                            <div class="row">
+                                                                <?php if ($isAdministrativo): ?>
+                                                                   
+                                                                    <div class="col-12">
+                                                                        <div class="mb-2">
+                                                                            <small>Serviço Administrativo:</small><br>
+                                                                            <span class="badge-nota" style="background-color: <?php echo getRatingColor($pesquisa['administrativo']); ?>">
+                                                                                <?php echo isset($pesquisa['administrativo']) && $pesquisa['administrativo'] <= 10 ? $pesquisa['administrativo'] : 'N/A'; ?>
+                                                                            </span>
+                                                                        </div>
+                                                                        <div class="mb-2">
+                                                                            <small>Recomendação:</small><br>
+                                                                            <span class="badge-nota" style="background-color: <?php echo getRatingColor($pesquisa['recomendacao']); ?>">
+                                                                                <?php echo $pesquisa['recomendacao']; ?>
+                                                                            </span>
+                                                                        </div>
+                                                                        <div class="mb-2">
+                                                                            <small>Média Calculada:</small><br>
+                                                                            <span class="badge-nota" style="background-color: <?php echo $cor_media; ?>">
+                                                                                <?php echo $media; ?>
+                                                                            </span>
+                                                                            <small class="text-muted ms-2">(Média entre administrativo e recomendação)</small>
+                                                                        </div>
+                                                                    </div>
+                                                                <?php else: ?>
+                                                                    
+                                                                    <div class="col-6">
+                                                                        <?php if (isset($pesquisa['recepcao']) && $pesquisa['recepcao'] <= 10): ?>
+                                                                        <div class="mb-2">
+                                                                            <small>Recepção:</small><br>
+                                                                            <span class="badge-nota" style="background-color: <?php echo getRatingColor($pesquisa['recepcao']); ?>">
+                                                                                <?php echo $pesquisa['recepcao']; ?>
+                                                                            </span>
+                                                                        </div>
+                                                                        <?php endif; ?>
+                                                                        
+                                                                        <?php if (isset($pesquisa['enfermagem']) && $pesquisa['enfermagem'] <= 10): ?>
+                                                                        <div class="mb-2">
+                                                                            <small>Enfermagem:</small><br>
+                                                                            <span class="badge-nota" style="background-color: <?php echo getRatingColor($pesquisa['enfermagem']); ?>">
+                                                                                <?php echo $pesquisa['enfermagem']; ?>
+                                                                            </span>
+                                                                        </div>
+                                                                        <?php endif; ?>
+                                                                        
+                                                                        <?php if (isset($pesquisa['medico']) && $pesquisa['medico'] <= 10): ?>
+                                                                        <div class="mb-2">
+                                                                            <small>Médico:</small><br>
+                                                                            <span class="badge-nota" style="background-color: <?php echo getRatingColor($pesquisa['medico']); ?>">
+                                                                                <?php echo $pesquisa['medico']; ?>
+                                                                            </span>
+                                                                        </div>
+                                                                        <?php endif; ?>
+                                                                        
+                                                                        <?php if (isset($pesquisa['nutricao']) && $pesquisa['nutricao'] <= 10): ?>
+                                                                        <div class="mb-2">
+                                                                            <small>Nutrição:</small><br>
+                                                                            <span class="badge-nota" style="background-color: <?php echo getRatingColor($pesquisa['nutricao']); ?>">
+                                                                                <?php echo $pesquisa['nutricao']; ?>
+                                                                            </span>
+                                                                        </div>
+                                                                        <?php endif; ?>
+                                                                        
+                                                                        <?php if (isset($pesquisa['hotelaria']) && $pesquisa['hotelaria'] <= 10): ?>
+                                                                        <div class="mb-2">
+                                                                            <small>Hotelaria:</small><br>
+                                                                            <span class="badge-nota" style="background-color: <?php echo getRatingColor($pesquisa['hotelaria']); ?>">
+                                                                                <?php echo $pesquisa['hotelaria']; ?>
+                                                                            </span>
+                                                                        </div>
+                                                                        <?php endif; ?>
+                                                                    </div>
+                                                                    <div class="col-6">
+                                                                        <?php if (isset($pesquisa['fisioterapia']) && $pesquisa['fisioterapia'] <= 10): ?>
+                                                                        <div class="mb-2">
+                                                                            <small>Fisioterapia:</small><br>
+                                                                            <span class="badge-nota" style="background-color: <?php echo getRatingColor($pesquisa['fisioterapia']); ?>">
+                                                                                <?php echo $pesquisa['fisioterapia']; ?>
+                                                                            </span>
+                                                                        </div>
+                                                                        <?php endif; ?>
+                                                                        
+                                                                        <?php if (isset($pesquisa['exames_laboratoriais']) && $pesquisa['exames_laboratoriais'] <= 10): ?>
+                                                                        <div class="mb-2">
+                                                                            <small>Exames Laboratoriais:</small><br>
+                                                                            <span class="badge-nota" style="background-color: <?php echo getRatingColor($pesquisa['exames_laboratoriais']); ?>">
+                                                                                <?php echo $pesquisa['exames_laboratoriais']; ?>
+                                                                            </span>
+                                                                        </div>
+                                                                        <?php endif; ?>
+                                                                        
+                                                                        <?php if (isset($pesquisa['exames_imagem']) && $pesquisa['exames_imagem'] <= 10): ?>
+                                                                        <div class="mb-2">
+                                                                            <small>Exames de Imagem:</small><br>
+                                                                            <span class="badge-nota" style="background-color: <?php echo getRatingColor($pesquisa['exames_imagem']); ?>">
+                                                                                <?php echo $pesquisa['exames_imagem']; ?>
+                                                                            </span>
+                                                                        </div>
+                                                                        <?php endif; ?>
+                                                                        
+                                                                        <?php if (isset($pesquisa['psicologia_servico_social']) && $pesquisa['psicologia_servico_social'] <= 10): ?>
+                                                                        <div class="mb-2">
+                                                                            <small>Psicologia/Serviço Social:</small><br>
+                                                                            <span class="badge-nota" style="background-color: <?php echo getRatingColor($pesquisa['psicologia_servico_social']); ?>">
+                                                                                <?php echo $pesquisa['psicologia_servico_social']; ?>
+                                                                            </span>
+                                                                        </div>
+                                                                        <?php endif; ?>
+                                                                        
+                                                                        <?php if (isset($pesquisa['centro_diagnostico']) && $pesquisa['centro_diagnostico'] <= 10): ?>
+                                                                        <div class="mb-2">
+                                                                            <small>Centro de Diagnóstico:</small><br>
+                                                                            <span class="badge-nota" style="background-color: <?php echo getRatingColor($pesquisa['centro_diagnostico']); ?>">
+                                                                                <?php echo $pesquisa['centro_diagnostico']; ?>
+                                                                            </span>
+                                                                        </div>
+                                                                        <?php endif; ?>
+                                                                        
+                                                                        <?php if (isset($pesquisa['centro_cirurgico']) && $pesquisa['centro_cirurgico'] <= 10): ?>
+                                                                        <div class="mb-2">
+                                                                            <small>Centro Cirúrgico:</small><br>
+                                                                            <span class="badge-nota" style="background-color: <?php echo getRatingColor($pesquisa['centro_cirurgico']); ?>">
+                                                                                <?php echo $pesquisa['centro_cirurgico']; ?>
+                                                                            </span>
+                                                                        </div>
+                                                                        <?php endif; ?>
+                                                                        
+                                                                        <div class="mb-2">
+                                                                            <small>Recomendação:</small><br>
+                                                                            <span class="badge-nota" style="background-color: <?php echo getRatingColor($pesquisa['recomendacao']); ?>">
+                                                                                <?php echo $pesquisa['recomendacao']; ?>
+                                                                            </span>
+                                                                        </div>
+                                                                    </div>
+                                                                <?php endif; ?>
+                                                            </div>
+                                                        </div>
+                                                        
+                                                        <?php if (!empty($pesquisa['comentario'])): ?>
+                                                        <div class="col-12 mt-3">
+                                                            <div class="resumo-item">
+                                                                <strong><i class="bi bi-chat-text me-2"></i>Comentários Adicionais:</strong><br>
+                                                                <?php echo nl2br(htmlspecialchars($pesquisa['comentario'])); ?>
+                                                            </div>
+                                                        </div>
+                                                        <?php endif; ?>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                    <?php endforeach; ?>
+                                <?php else: ?>
+                                    <tr>
+                                        <td colspan="11" class="text-center">
+                                            <div class="alert alert-info mt-3">
+                                                <i class="bi bi-info-circle me-2"></i>
+                                                <?php echo (isset($_GET['data_inicio']) || isset($_GET['tipo_atendimento']) || isset($_GET['setor'])) ? 
+                                                    'Nenhuma pesquisa encontrada com os filtros aplicados.' : 
+                                                    'Nenhuma pesquisa encontrada nesta categoria.'; ?>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                <?php endif; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                    <?php endif; ?>
+                    
+                    
+                    <div class="alert alert-info mt-4">
+                        <h5 class="alert-heading"><i class="bi bi-info-circle me-2"></i>Como usar</h5>
+                        <ul class="mb-0">
+                            <li>Use as abas para alternar entre os diferentes tipos de pesquisas</li>
+                            <li>Use os filtros para encontrar pesquisas específicas</li>
+                            <li>Clique no ícone <i class="bi bi-eye"></i> para ver detalhes completos da pesquisa</li>
+                            <li>Clique no ícone <i class="bi bi-telephone"></i> para marcar/registrar contato com a pessoa</li>
+                            <li><strong class="text-success">Linhas verdes</strong> indicam contato já realizado</li>
+                            <li><strong class="text-success">Ícone ✓</strong> ao lado do ID indica contato realizado</li>
+                            <li>Use o botão "Exportar para Excel" para baixar os dados incluindo status de contato</li>
+                            <li><strong>Atenção:</strong> Para atendimentos administrativos, a média é calculada apenas com as notas de serviço administrativo e recomendação</li>
+                            <li><strong>Atenção:</strong> Para atendimentos assistenciais, NÃO é mostrada a nota administrativa</li>
+                            <li><strong>NPS (Net Promoter Score):</strong> Calculado baseado na pergunta de recomendação (0-6: Detratores, 7-8: Neutros, 9-10: Promotores)</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<footer>
+    <div class="container">
+        <p class="mb-0">Hospital Sagrada Família - Sistema de Pesquisa de Satisfação</p>
+        <p class="mb-0 small">Versão 1.0 | Última consulta: <?php echo date('d/m/Y H:i'); ?></p>
+    </div>
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+       
+        const dataFimInput = document.getElementById('data_fim');
+        if (dataFimInput && dataFimInput.value === '') {
+            const hoje = new Date();
+            dataFimInput.value = hoje.toISOString().split('T')[0];
+        }
+        
+        
+        const dataInicioInput = document.getElementById('data_inicio');
+        if (dataInicioInput && dataInicioInput.value === '') {
+            const trintaDiasAtras = new Date();
+            trintaDiasAtras.setDate(trintaDiasAtras.getDate() - 30);
+            dataInicioInput.value = trintaDiasAtras.toISOString().split('T')[0];
+        }
+        
+       
+        const setorSelect = document.getElementById('setor');
+        const filtroSetor = "<?php echo $filtro_setor; ?>";
+        if (setorSelect && filtroSetor) {
+            setorSelect.value = filtroSetor;
+        }
+        
+        
+        const contatoSelect = document.getElementById('contato_realizado');
+        const filtroContato = "<?php echo $filtro_contato_realizado; ?>";
+        if (contatoSelect && filtroContato) {
+            contatoSelect.value = filtroContato;
+        }
+        
+        
+        const toggleAllButton = document.createElement('button');
+        toggleAllButton.className = 'btn btn-sm btn-outline-secondary mb-3';
+        toggleAllButton.innerHTML = '<i class="bi bi-arrows-expand me-1"></i>Expandir/Recolher Todas';
+        toggleAllButton.type = 'button';
+        toggleAllButton.onclick = function() {
+            const collapses = document.querySelectorAll('.collapse');
+            const isAnyOpen = Array.from(collapses).some(c => c.classList.contains('show'));
+            
+            collapses.forEach(collapse => {
+                if (isAnyOpen) {
+                    collapse.classList.remove('show');
+                } else {
+                    collapse.classList.add('show');
+                }
+            });
+        };
+        
+        const tabela = document.getElementById('tabela-pesquisas');
+        if (tabela) {
+            tabela.parentNode.insertBefore(toggleAllButton, tabela);
+        }
+        
+        
+        const modais = document.querySelectorAll('form[method="post"]');
+        modais.forEach(form => {
+            form.addEventListener('submit', function(e) {
+                const contatoRealizado = this.querySelector('input[name="contato_realizado"]:checked');
+                if (contatoRealizado && contatoRealizado.value === 'sim') {
+                    if (!confirm('Confirmar registro de contato realizado?')) {
+                        e.preventDefault();
+                    }
+                }
+            });
+        });
+    });
+</script>
+</body>
+</html>
