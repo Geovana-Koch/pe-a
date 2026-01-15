@@ -1,0 +1,1473 @@
+<?php
+date_default_timezone_set('America/Sao_Paulo');
+session_start();
+
+require_once 'config.php'; 
+$conexao = $pdo;
+
+// FUNÇÕES AUXILIARES
+function calcularHorasTreinamento($hora_inicio, $hora_fim) {
+    if (empty($hora_inicio) || empty($hora_fim)) {
+        return 0;
+    }
+    
+    $inicio = DateTime::createFromFormat('H:i:s', $hora_inicio);
+    $fim = DateTime::createFromFormat('H:i:s', $hora_fim);
+    
+    if (!$inicio || !$fim) {
+        return 0;
+    }
+    
+    $diferenca = $inicio->diff($fim);
+    $horas = $diferenca->h + ($diferenca->i / 60);
+    
+    return round($horas, 2);
+}
+
+function verificarInconsistenciaHorarios($treinamento) {
+    $inconsistencias = [];
+    
+    // Verificar se o horário de entrada do participante está fora do horário do treinamento
+    if (!empty($treinamento['hora_entrada']) && !empty($treinamento['hora_inicio'])) {
+        $entrada = strtotime($treinamento['hora_entrada']);
+        $inicio_treinamento = strtotime($treinamento['hora_inicio']);
+        
+        // Se entrada for mais de 30 minutos antes do início
+        if ($entrada < ($inicio_treinamento - 1800)) {
+            $inconsistencias[] = "Entrada muito antecipada";
+        }
+        
+        // Se entrada for depois do início
+        if ($entrada > $inicio_treinamento) {
+            $inconsistencias[] = "Entrada após início do treinamento";
+        }
+    }
+    
+    // Verificar se o horário de saída está fora do horário do treinamento
+    if (!empty($treinamento['hora_saida']) && !empty($treinamento['hora_fim'])) {
+        $saida = strtotime($treinamento['hora_saida']);
+        $fim_treinamento = strtotime($treinamento['hora_fim']);
+        
+        // Se saída for antes do fim
+        if ($saida < $fim_treinamento) {
+            $inconsistencias[] = "Saída antecipada";
+        }
+        
+        // Se saída for muito depois do fim
+        if ($saida > ($fim_treinamento + 1800)) {
+            $inconsistencias[] = "Saída muito após término";
+        }
+    }
+    
+    return $inconsistencias;
+}
+
+// VARIÁVEIS DE FILTRO
+$filtro_tipo = $_GET['tipo'] ?? 'mes'; 
+$filtro_periodo = $_GET['periodo'] ?? date('Y-m'); 
+$filtro_ranking_tipo = $_GET['ranking_tipo'] ?? 'educador'; 
+$filtro_pessoa_especifica = $_GET['pessoa_especifica'] ?? '';
+$filtro_setor = $_GET['setor'] ?? '';
+$filtro_treinamento_previsto = $_GET['treinamento_previsto'] ?? '';
+$filtro_qualidade_seguranca = $_GET['qualidade_seguranca'] ?? '';
+
+if ($filtro_tipo == 'mes') {
+    $periodo_texto = date('F/Y', strtotime($filtro_periodo . '-01'));
+    $data_inicio = $filtro_periodo . '-01';
+    $data_fim = date('Y-m-t', strtotime($data_inicio));
+} else {
+    $periodo_texto = $filtro_periodo;
+    $data_inicio = $filtro_periodo . '-01-01';
+    $data_fim = $filtro_periodo . '-12-31';
+}
+
+$ranking_data = [];
+$detalhes_pessoa = null;
+$treinamentos_pessoa = [];
+$estatisticas = [];
+$erro = null;
+
+// Buscar lista de educadores
+try {
+    $sql_lista_educadores = "SELECT DISTINCT nome_educador FROM Treinamentos ORDER BY nome_educador";
+    $stmt_educadores_list = $conexao->query($sql_lista_educadores);
+    $lista_educadores = $stmt_educadores_list->fetchAll(PDO::FETCH_COLUMN);
+} catch (PDOException $e) {
+    $lista_educadores = [];
+    error_log("Erro ao buscar lista de educadores: " . $e->getMessage());
+}
+
+// Buscar lista de participantes
+try {
+    $sql_desc_tabela = "DESCRIBE Treinamento_Participantes";
+    $stmt_desc = $conexao->query($sql_desc_tabela);
+    $campos_tabela = $stmt_desc->fetchAll(PDO::FETCH_ASSOC);
+    
+    $campo_nome_participante = 'id_participacao';
+    foreach ($campos_tabela as $campo) {
+        $field_lower = strtolower($campo['Field']);
+        if ($field_lower == 'nome' || 
+            $field_lower == 'nome_participante' || 
+            $field_lower == 'participante' ||
+            $field_lower == 'funcionario' ||
+            strpos($field_lower, 'cracha') !== false ||
+            strpos($field_lower, 'matricula') !== false) {
+            $campo_nome_participante = $campo['Field'];
+            break;
+        }
+    }
+    
+    $sql_lista_participantes = "
+        SELECT DISTINCT $campo_nome_participante 
+        FROM Treinamento_Participantes 
+        WHERE $campo_nome_participante IS NOT NULL 
+        AND $campo_nome_participante != ''
+        ORDER BY $campo_nome_participante
+    ";
+    $stmt_participantes_list = $conexao->query($sql_lista_participantes);
+    $lista_participantes = $stmt_participantes_list->fetchAll(PDO::FETCH_COLUMN);
+    
+} catch (PDOException $e) {
+    $lista_participantes = [];
+    error_log("Erro ao buscar lista de participantes: " . $e->getMessage());
+}
+
+// Buscar estatísticas gerais
+try {
+    // Total de educadores
+    $sql_total_educadores = "
+        SELECT COUNT(DISTINCT nome_educador) as total 
+        FROM Treinamentos 
+        WHERE data_treinamento BETWEEN :data_inicio AND :data_fim
+    ";
+    $stmt_total_educ = $conexao->prepare($sql_total_educadores);
+    $stmt_total_educ->execute([
+        ':data_inicio' => $data_inicio,
+        ':data_fim' => $data_fim
+    ]);
+    $estatisticas['total_educadores'] = (int)$stmt_total_educ->fetchColumn();
+    
+    // Total de treinamentos
+    $sql_total_treinamentos = "
+        SELECT COUNT(*) as total 
+        FROM Treinamentos 
+        WHERE data_treinamento BETWEEN :data_inicio AND :data_fim
+    ";
+    $stmt_total_train = $conexao->prepare($sql_total_treinamentos);
+    $stmt_total_train->execute([
+        ':data_inicio' => $data_inicio,
+        ':data_fim' => $data_fim
+    ]);
+    $estatisticas['total_treinamentos'] = (int)$stmt_total_train->fetchColumn();
+    
+    // Total de participantes distintos
+    $sql_desc = "DESCRIBE Treinamento_Participantes";
+    $stmt_desc = $conexao->query($sql_desc);
+    $desc_campos = $stmt_desc->fetchAll(PDO::FETCH_ASSOC);
+    
+    $campo_identificacao = 'id_participacao';
+    foreach ($desc_campos as $campo) {
+        $field_lower = strtolower($campo['Field']);
+        if ($field_lower == 'nome' || 
+            $field_lower == 'nome_participante' || 
+            $field_lower == 'participante' ||
+            strpos($field_lower, 'cracha') !== false ||
+            strpos($field_lower, 'matricula') !== false) {
+            $campo_identificacao = $campo['Field'];
+            break;
+        }
+    }
+    
+    $sql_total_participantes = "
+        SELECT COUNT(DISTINCT tp.$campo_identificacao) as total
+        FROM Treinamento_Participantes tp
+        INNER JOIN Treinamentos t ON tp.id_treinamento = t.id_treinamento
+        WHERE t.data_treinamento BETWEEN :data_inicio AND :data_fim
+        AND tp.$campo_identificacao IS NOT NULL 
+        AND tp.$campo_identificacao != ''
+    ";
+    $stmt_total_part = $conexao->prepare($sql_total_participantes);
+    $stmt_total_part->execute([
+        ':data_inicio' => $data_inicio,
+        ':data_fim' => $data_fim
+    ]);
+    $estatisticas['total_participantes'] = (int)$stmt_total_part->fetchColumn();
+    
+    // Total de participações
+    $sql_total_participacoes = "
+        SELECT COUNT(*) as total
+        FROM Treinamento_Participantes tp
+        INNER JOIN Treinamentos t ON tp.id_treinamento = t.id_treinamento
+        WHERE t.data_treinamento BETWEEN :data_inicio AND :data_fim
+    ";
+    $stmt_total_parts = $conexao->prepare($sql_total_participacoes);
+    $stmt_total_parts->execute([
+        ':data_inicio' => $data_inicio,
+        ':data_fim' => $data_fim
+    ]);
+    $estatisticas['total_participacoes'] = (int)$stmt_total_parts->fetchColumn();
+    
+} catch (PDOException $e) {
+    $erro = "Erro ao buscar estatísticas: " . $e->getMessage();
+    error_log($erro);
+}
+
+// RANKING DE EDUCADORES
+if ($filtro_ranking_tipo == 'educador') {
+    
+    if (!empty($filtro_pessoa_especifica)) {
+        // DETALHES DE UM EDUCADOR ESPECÍFICO
+        try {
+            $sql_educador_especifico = "
+                SELECT 
+                    t.nome_educador,
+                    t.setor_educador,
+                    COUNT(DISTINCT t.id_treinamento) as total_treinamentos,
+                    COUNT(DISTINCT tp.id_participacao) as total_participantes,
+                    SUM(CASE WHEN t.matriz_anual = 1 THEN 1 ELSE 0 END) as treinamentos_matriz,
+                    SUM(CASE WHEN t.qualidade_seguranca = 1 THEN 1 ELSE 0 END) as treinamentos_qualidade,
+                    MIN(t.data_treinamento) as primeiro_treinamento,
+                    MAX(t.data_treinamento) as ultimo_treinamento
+                FROM Treinamentos t
+                LEFT JOIN Treinamento_Participantes tp ON t.id_treinamento = tp.id_treinamento
+                WHERE t.data_treinamento BETWEEN :data_inicio AND :data_fim
+                AND t.nome_educador = :pessoa
+            ";
+            
+            $stmt_educador = $conexao->prepare($sql_educador_especifico);
+            $stmt_educador->execute([
+                ':data_inicio' => $data_inicio,
+                ':data_fim' => $data_fim,
+                ':pessoa' => $filtro_pessoa_especifica
+            ]);
+            $detalhes_pessoa = $stmt_educador->fetch(PDO::FETCH_ASSOC);
+            
+            if ($detalhes_pessoa) {
+                // TREINAMENTOS DO EDUCADOR ESPECÍFICO
+                $sql_treinamentos_educador = "
+                    SELECT 
+                        t.id_treinamento,
+                        t.assunto,
+                        t.data_treinamento,
+                        t.hora_inicio,
+                        t.hora_fim,
+                        COUNT(DISTINCT tp.id_participacao) as participantes,
+                        t.matriz_anual,
+                        t.qualidade_seguranca,
+                        TIMESTAMPDIFF(MINUTE, 
+                            CONCAT(t.data_treinamento, ' ', t.hora_inicio),
+                            CONCAT(t.data_treinamento, ' ', COALESCE(t.hora_fim, t.hora_inicio))
+                        ) as duracao_minutos
+                    FROM Treinamentos t
+                    LEFT JOIN Treinamento_Participantes tp ON t.id_treinamento = tp.id_treinamento
+                    WHERE t.data_treinamento BETWEEN :data_inicio AND :data_fim
+                    AND t.nome_educador = :pessoa
+                    GROUP BY t.id_treinamento
+                    ORDER BY t.data_treinamento DESC
+                ";
+                
+                $stmt_treinamentos = $conexao->prepare($sql_treinamentos_educador);
+                $stmt_treinamentos->execute([
+                    ':data_inicio' => $data_inicio,
+                    ':data_fim' => $data_fim,
+                    ':pessoa' => $filtro_pessoa_especifica
+                ]);
+                $treinamentos_pessoa = $stmt_treinamentos->fetchAll(PDO::FETCH_ASSOC);
+            }
+            
+        } catch (PDOException $e) {
+            $erro = "Erro ao buscar dados do educador: " . $e->getMessage();
+            error_log($erro);
+        }
+    } else {
+        // RANKING GERAL DE EDUCADORES
+        try {
+            $sql_educadores = "
+                SELECT 
+                    t.nome_educador,
+                    t.setor_educador,
+                    COUNT(DISTINCT t.id_treinamento) as total_treinamentos,
+                    COUNT(DISTINCT tp.id_participacao) as total_participantes,
+                    SUM(CASE WHEN t.matriz_anual = 1 THEN 1 ELSE 0 END) as treinamentos_matriz,
+                    SUM(CASE WHEN t.qualidade_seguranca = 1 THEN 1 ELSE 0 END) as treinamentos_qualidade,
+                    MIN(t.data_treinamento) as primeiro_treinamento,
+                    MAX(t.data_treinamento) as ultimo_treinamento
+                FROM Treinamentos t
+                LEFT JOIN Treinamento_Participantes tp ON t.id_treinamento = tp.id_treinamento
+                WHERE t.data_treinamento BETWEEN :data_inicio AND :data_fim
+            ";
+            
+            $condicoes = [];
+            $parametros = [
+                ':data_inicio' => $data_inicio,
+                ':data_fim' => $data_fim
+            ];
+
+            // Filtro de treinamento previsto (Matriz Anual)
+            if ($filtro_treinamento_previsto == 'sim') {
+                $condicoes[] = "t.matriz_anual = 1";
+            } elseif ($filtro_treinamento_previsto == 'nao') {
+                $condicoes[] = "(t.matriz_anual = 0 OR t.matriz_anual IS NULL)";
+            }
+
+            // Filtro de qualidade/segurança
+            if ($filtro_qualidade_seguranca == 'sim') {
+                $condicoes[] = "t.qualidade_seguranca = 1";
+            } elseif ($filtro_qualidade_seguranca == 'nao') {
+                $condicoes[] = "(t.qualidade_seguranca = 0 OR t.qualidade_seguranca IS NULL)";
+            }
+
+            // Combinar condições
+            if (!empty($condicoes)) {
+                $sql_educadores .= " AND " . implode(" AND ", $condicoes);
+            }
+
+            $sql_educadores .= "
+                GROUP BY t.nome_educador, t.setor_educador
+                ORDER BY total_treinamentos DESC, total_participantes DESC
+            ";
+
+            $stmt_educadores = $conexao->prepare($sql_educadores);
+            $stmt_educadores->execute($parametros);
+            $ranking_data = $stmt_educadores->fetchAll(PDO::FETCH_ASSOC);
+            
+        } catch (PDOException $e) {
+            $erro = "Erro ao buscar ranking de educadores: " . $e->getMessage();
+            error_log($erro);
+        }
+    }
+}
+
+// RANKING DE PARTICIPANTES
+if ($filtro_ranking_tipo == 'participante') {
+    
+    try {
+        $sql_desc_participantes = "DESCRIBE Treinamento_Participantes";
+        $stmt_desc = $conexao->query($sql_desc_participantes);
+        $desc_participantes = $stmt_desc->fetchAll(PDO::FETCH_ASSOC);
+        
+        $campo_nome_participante = 'id_participacao';
+        foreach ($desc_participantes as $campo) {
+            $field_lower = strtolower($campo['Field']);
+            if ($field_lower == 'nome' || 
+                $field_lower == 'nome_participante' || 
+                $field_lower == 'participante' ||
+                strpos($field_lower, 'cracha') !== false ||
+                strpos($field_lower, 'matricula') !== false) {
+                $campo_nome_participante = $campo['Field'];
+                break;
+            }
+        }
+        
+        if (!empty($filtro_pessoa_especifica)) {
+            // DETALHES DE UM PARTICIPANTE ESPECÍFICO
+            $sql_participante_especifico = "
+                SELECT 
+                    tp.$campo_nome_participante as nome_participante,
+                    COUNT(DISTINCT tp.id_treinamento) as total_treinamentos_feitos,
+                    COUNT(DISTINCT t.assunto) as assuntos_distintos,
+                    SUM(CASE WHEN t.qualidade_seguranca = 1 THEN 1 ELSE 0 END) as treinamentos_qualidade,
+                    SUM(CASE WHEN t.matriz_anual = 1 THEN 1 ELSE 0 END) as treinamentos_matriz,
+                    MIN(t.data_treinamento) as primeiro_treinamento,
+                    MAX(t.data_treinamento) as ultimo_treinamento,
+                    SUM(
+                        TIMESTAMPDIFF(MINUTE, 
+                            CONCAT(t.data_treinamento, ' ', COALESCE(tp.hora_entrada, t.hora_inicio)),
+                            CONCAT(t.data_treinamento, ' ', COALESCE(tp.hora_saida, COALESCE(t.hora_fim, t.hora_inicio)))
+                        )
+                    ) / 60.0 as horas_totais
+                FROM Treinamento_Participantes tp
+                INNER JOIN Treinamentos t ON tp.id_treinamento = t.id_treinamento
+                WHERE t.data_treinamento BETWEEN :data_inicio AND :data_fim
+                AND tp.$campo_nome_participante = :pessoa
+                GROUP BY tp.$campo_nome_participante
+            ";
+            
+            $stmt_participante = $conexao->prepare($sql_participante_especifico);
+            $stmt_participante->execute([
+                ':data_inicio' => $data_inicio,
+                ':data_fim' => $data_fim,
+                ':pessoa' => $filtro_pessoa_especifica
+            ]);
+            $detalhes_pessoa = $stmt_participante->fetch(PDO::FETCH_ASSOC);
+            
+            if ($detalhes_pessoa) {
+                // TREINAMENTOS DO PARTICIPANTE ESPECÍFICO
+                $sql_treinamentos_participante = "
+                    SELECT 
+                        t.id_treinamento,
+                        t.assunto,
+                        t.data_treinamento,
+                        t.nome_educador,
+                        t.matriz_anual,
+                        t.qualidade_seguranca,
+                        t.hora_inicio,
+                        t.hora_fim,
+                        tp.hora_entrada,
+                        tp.hora_saida,
+                        TIMESTAMPDIFF(MINUTE, 
+                            CONCAT(t.data_treinamento, ' ', t.hora_inicio),
+                            CONCAT(t.data_treinamento, ' ', COALESCE(t.hora_fim, t.hora_inicio))
+                        ) as duracao_minutos,
+                        TIMESTAMPDIFF(MINUTE, 
+                            CONCAT(t.data_treinamento, ' ', COALESCE(tp.hora_entrada, t.hora_inicio)),
+                            CONCAT(t.data_treinamento, ' ', COALESCE(tp.hora_saida, COALESCE(t.hora_fim, t.hora_inicio)))
+                        ) as duracao_participacao_minutos
+                    FROM Treinamentos t
+                    INNER JOIN Treinamento_Participantes tp ON t.id_treinamento = tp.id_treinamento
+                    WHERE t.data_treinamento BETWEEN :data_inicio AND :data_fim
+                    AND tp.$campo_nome_participante = :pessoa
+                    ORDER BY t.data_treinamento DESC
+                ";
+                
+                $stmt_treinamentos_part = $conexao->prepare($sql_treinamentos_participante);
+                $stmt_treinamentos_part->execute([
+                    ':data_inicio' => $data_inicio,
+                    ':data_fim' => $data_fim,
+                    ':pessoa' => $filtro_pessoa_especifica
+                ]);
+                $treinamentos_pessoa = $stmt_treinamentos_part->fetchAll(PDO::FETCH_ASSOC);
+            }
+            
+        } else {
+            // RANKING GERAL DE PARTICIPANTES
+            $sql_participantes = "
+                SELECT 
+                    tp.$campo_nome_participante as nome_participante,
+                    tp.setor as setor_participante,
+                    COUNT(DISTINCT tp.id_treinamento) as total_treinamentos_feitos,
+                    COUNT(DISTINCT t.assunto) as assuntos_distintos,
+                    SUM(CASE WHEN t.qualidade_seguranca = 1 THEN 1 ELSE 0 END) as treinamentos_qualidade,
+                    SUM(CASE WHEN t.matriz_anual = 1 THEN 1 ELSE 0 END) as treinamentos_matriz,
+                    MIN(t.data_treinamento) as primeiro_treinamento,
+                    MAX(t.data_treinamento) as ultimo_treinamento,
+                    SUM(
+                        TIMESTAMPDIFF(MINUTE, 
+                            CONCAT(t.data_treinamento, ' ', COALESCE(tp.hora_entrada, t.hora_inicio)),
+                            CONCAT(t.data_treinamento, ' ', COALESCE(tp.hora_saida, COALESCE(t.hora_fim, t.hora_inicio)))
+                        )
+                    ) / 60.0 as horas_totais
+                FROM Treinamento_Participantes tp
+                INNER JOIN Treinamentos t ON tp.id_treinamento = t.id_treinamento
+                WHERE t.data_treinamento BETWEEN :data_inicio AND :data_fim
+                AND tp.$campo_nome_participante IS NOT NULL 
+                AND tp.$campo_nome_participante != ''
+            ";
+            
+            $condicoes_participantes = [];
+            $parametros_participantes = [
+                ':data_inicio' => $data_inicio,
+                ':data_fim' => $data_fim
+            ];
+
+            // Filtro de setor para participantes
+            if (!empty($filtro_setor)) {
+                $condicoes_participantes[] = "tp.setor = :setor";
+                $parametros_participantes[':setor'] = $filtro_setor;
+            }
+
+            // Filtro de treinamento previsto
+            if ($filtro_treinamento_previsto == 'sim') {
+                $condicoes_participantes[] = "t.matriz_anual = 1";
+            } elseif ($filtro_treinamento_previsto == 'nao') {
+                $condicoes_participantes[] = "(t.matriz_anual = 0 OR t.matriz_anual IS NULL)";
+            }
+
+            // Filtro de qualidade/segurança
+            if ($filtro_qualidade_seguranca == 'sim') {
+                $condicoes_participantes[] = "t.qualidade_seguranca = 1";
+            } elseif ($filtro_qualidade_seguranca == 'nao') {
+                $condicoes_participantes[] = "(t.qualidade_seguranca = 0 OR t.qualidade_seguranca IS NULL)";
+            }
+
+            // Combinar condições
+            if (!empty($condicoes_participantes)) {
+                $sql_participantes .= " AND " . implode(" AND ", $condicoes_participantes);
+            }
+
+            $sql_participantes .= "
+                GROUP BY tp.$campo_nome_participante, tp.setor
+                ORDER BY total_treinamentos_feitos DESC, assuntos_distintos DESC
+            ";
+
+            $stmt_participantes = $conexao->prepare($sql_participantes);
+            $stmt_participantes->execute($parametros_participantes);
+            $ranking_data = $stmt_participantes->fetchAll(PDO::FETCH_ASSOC);
+        }
+        
+    } catch (PDOException $e) {
+        $erro = "Erro ao buscar ranking de participantes: " . $e->getMessage();
+        error_log($erro);
+    }
+}
+
+// Buscar lista de setores para o filtro
+try {
+    $sql_setores = "SELECT DISTINCT setor FROM Treinamento_Participantes WHERE setor IS NOT NULL AND setor != '' ORDER BY setor";
+    $stmt_setores = $conexao->query($sql_setores);
+    $setores = $stmt_setores->fetchAll(PDO::FETCH_COLUMN);
+} catch (PDOException $e) {
+    $setores = [];
+    error_log("Erro ao buscar setores: " . $e->getMessage());
+}
+?>
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ranking de Treinamentos - Módulo Bússola</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root {
+            --primary-color: #2c3e50;
+            --secondary-color: #3498db;
+            --success-color: #27ae60;
+            --warning-color: #f39c12;
+            --danger-color: #e74c3c;
+            --light-color: #ecf0f1;
+        }
+        
+        body {
+            background-color: #f8f9fa;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            padding-bottom: 60px;
+        }
+        
+        .navbar {
+            background-color: var(--primary-color) !important;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+        
+        .navbar-brand {
+            font-weight: 600;
+        }
+        
+        .card {
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+            margin-bottom: 20px;
+            border: none;
+        }
+        
+        .card-header {
+            background-color: var(--primary-color);
+            color: white;
+            border-radius: 10px 10px 0 0 !important;
+            padding: 15px 20px;
+        }
+        
+        .btn-primary {
+            background-color: var(--secondary-color);
+            border-color: var(--secondary-color);
+        }
+        
+        .btn-primary:hover {
+            background-color: #2980b9;
+            border-color: #2980b9;
+        }
+        
+        .ranking-badge {
+            font-size: 0.9em;
+            font-weight: 600;
+            padding: 5px 10px;
+            border-radius: 20px;
+        }
+        
+        .gold {
+            background: linear-gradient(45deg, #FFD700, #FFEC8B);
+            color: #8B7500;
+        }
+        
+        .silver {
+            background: linear-gradient(45deg, #C0C0C0, #E8E8E8);
+            color: #696969;
+        }
+        
+        .bronze {
+            background: linear-gradient(45deg, #CD7F32, #E8B87A);
+            color: #654321;
+        }
+        
+        .ranking-table th {
+            background-color: var(--light-color);
+            position: sticky;
+            top: 0;
+        }
+        
+        .podium {
+            display: flex;
+            justify-content: center;
+            align-items: flex-end;
+            margin: 30px 0;
+            gap: 20px;
+        }
+        
+        .podium-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        
+        .podium-place {
+            width: 80px;
+            text-align: center;
+            font-weight: bold;
+            font-size: 24px;
+            padding: 15px 0;
+            border-radius: 10px 10px 0 0;
+            color: white;
+        }
+        
+        .first-place {
+            height: 120px;
+            background-color: #FFD700;
+        }
+        
+        .second-place {
+            height: 90px;
+            background-color: #C0C0C0;
+        }
+        
+        .third-place {
+            height: 70px;
+            background-color: #CD7F32;
+        }
+        
+        .podium-name {
+            margin-top: 10px;
+            font-weight: 600;
+            text-align: center;
+            max-width: 100px;
+        }
+        
+        .stats-card {
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+            color: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+        }
+        
+        .stats-icon {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+        }
+        
+        .stats-number {
+            font-size: 2rem;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+        
+        .stats-label {
+            font-size: 0.9rem;
+            opacity: 0.9;
+        }
+        
+        .perfil-card {
+            background: linear-gradient(135deg, var(--secondary-color), #2980b9);
+            color: white;
+            border-radius: 10px;
+            padding: 25px;
+            margin-bottom: 20px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+        }
+        
+        .perfil-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        
+        .perfil-avatar {
+            width: 80px;
+            height: 80px;
+            background-color: rgba(255, 255, 255, 0.2);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 2.5rem;
+            margin-right: 20px;
+        }
+        
+        .perfil-info h3 {
+            margin: 0;
+            font-weight: 600;
+        }
+        
+        .perfil-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+        
+        .stat-item {
+            background-color: rgba(255, 255, 255, 0.1);
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+        }
+        
+        .stat-value {
+            font-size: 1.8rem;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+        
+        .stat-label {
+            font-size: 0.9rem;
+            opacity: 0.9;
+        }
+        
+        footer {
+            position: fixed;
+            bottom: 0;
+            width: 100%;
+            padding: 1rem 0;
+            background-color: var(--primary-color);
+            color: white;
+            text-align: center;
+        }
+        
+        @media (max-width: 768px) {
+            .podium {
+                flex-direction: column;
+                align-items: center;
+                gap: 10px;
+            }
+            
+            .podium-item {
+                flex-direction: row;
+                width: 100%;
+                justify-content: center;
+                gap: 10px;
+            }
+            
+            .podium-place {
+                width: 60px;
+                height: 60px !important;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                border-radius: 10px;
+            }
+            
+            .first-place, .second-place, .third-place {
+                height: 60px !important;
+            }
+            
+            .perfil-header {
+                flex-direction: column;
+                text-align: center;
+            }
+            
+            .perfil-avatar {
+                margin-right: 0;
+                margin-bottom: 15px;
+            }
+        }
+    </style>
+</head>
+<body>
+
+<nav class="navbar navbar-expand-lg navbar-dark mb-4">
+    <div class="container">
+        <a class="navbar-brand d-flex align-items-center" href="#">
+            <i class="bi bi-trophy me-2"></i>
+            Módulo Bússola - Ranking de Treinamentos
+        </a>
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+            <span class="navbar-toggler-icon"></span>
+        </button>
+        <div class="collapse navbar-collapse" id="navbarNav">
+            <ul class="navbar-nav ms-auto">
+                <li class="nav-item">
+                    <a class="nav-link" href="home.php"><i class="bi bi-house-door me-1"></i>Início</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link" href="cracha.php"><i class="bi bi-plus-circle me-1"></i>Novo Treinamento</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link" href="consulta.php"><i class="bi bi-search me-1"></i>Consulta</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link active" href="ranking.php"><i class="bi bi-trophy me-1"></i>Ranking</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link" href="logout.php"><i class="bi bi-box-arrow-right me-1"></i>Sair</a>
+                </li>
+            </ul>
+        </div>
+    </div>
+</nav>
+
+<div class="container mb-5">
+    <div class="row justify-content-center">
+        <div class="col-lg-12">
+            
+            <div class="card mb-4">
+                <div class="card-header">
+                    <h1 class="h4 mb-0">Filtros do Ranking</h1>
+                </div>
+                <div class="card-body">
+                    <form method="get" action="" id="formFiltros">
+                        <div class="row">
+                            
+                            <div class="col-md-3 mb-3">
+                                <label for="ranking_tipo" class="form-label">Tipo de Ranking</label>
+                                <select class="form-select" id="ranking_tipo" name="ranking_tipo">
+                                    <option value="educador" <?php echo $filtro_ranking_tipo == 'educador' ? 'selected' : ''; ?>>Ranking de Educadores</option>
+                                    <option value="participante" <?php echo $filtro_ranking_tipo == 'participante' ? 'selected' : ''; ?>>Ranking de Participantes</option>
+                                    <option value="setor" <?php echo $filtro_ranking_tipo == 'setor' ? 'selected' : ''; ?>>Ranking por Setor</option>
+                                </select>
+                            </div>
+                            
+                            <div class="col-md-3 mb-3">
+                                <label for="tipo" class="form-label">Período</label>
+                                <select class="form-select" id="tipo" name="tipo" onchange="updatePeriodoInput()">
+                                    <option value="mes" <?php echo $filtro_tipo == 'mes' ? 'selected' : ''; ?>>Mensal</option>
+                                    <option value="ano" <?php echo $filtro_tipo == 'ano' ? 'selected' : ''; ?>>Anual</option>
+                                </select>
+                            </div>
+                            <div class="col-md-3 mb-3">
+                                <label for="periodo" class="form-label" id="periodo_label">
+                                    <?php echo $filtro_tipo == 'mes' ? 'Mês/Ano' : 'Ano'; ?>
+                                </label>
+                                <?php if ($filtro_tipo == 'mes'): ?>
+                                    <input type="month" class="form-control" id="periodo" name="periodo" 
+                                           value="<?php echo $filtro_periodo; ?>">
+                                <?php else: ?>
+                                    <input type="number" class="form-control" id="periodo" name="periodo" 
+                                           value="<?php echo $filtro_periodo; ?>" min="2020" max="<?php echo date('Y'); ?>">
+                                <?php endif; ?>
+                            </div>
+                            
+                            <div class="col-md-3 mb-3">
+                                <label for="pessoa_especifica" class="form-label" id="pessoa_label">
+                                    <?php echo $filtro_ranking_tipo == 'educador' ? 'Educador Específico' : 'Participante Específico'; ?>
+                                </label>
+                                <select class="form-select" id="pessoa_especifica" name="pessoa_especifica">
+                                    <option value="">Todos (Ranking Geral)</option>
+                                    <?php if ($filtro_ranking_tipo == 'educador'): ?>
+                                        <?php foreach ($lista_educadores as $educador): ?>
+                                            <option value="<?php echo htmlspecialchars($educador); ?>"
+                                                <?php echo $filtro_pessoa_especifica == $educador ? 'selected' : ''; ?>>
+                                                <?php echo htmlspecialchars($educador); ?>
+                                            </option>
+                                        <?php endforeach; ?>
+                                    <?php else: ?>
+                                        <?php foreach ($lista_participantes as $participante): ?>
+                                            <option value="<?php echo htmlspecialchars($participante); ?>"
+                                                <?php echo $filtro_pessoa_especifica == $participante ? 'selected' : ''; ?>>
+                                                <?php echo htmlspecialchars($participante); ?>
+                                            </option>
+                                        <?php endforeach; ?>
+                                    <?php endif; ?>
+                                </select>
+                            </div>
+
+                            <!-- NOVOS FILTROS -->
+                            <div class="col-md-3 mb-3">
+                                <label for="setor" class="form-label">Filtrar por Setor</label>
+                                <select class="form-select" id="setor" name="setor">
+                                    <option value="">Todos os Setores</option>
+                                    <?php foreach ($setores as $setor): ?>
+                                        <option value="<?php echo htmlspecialchars($setor); ?>"
+                                            <?php echo $filtro_setor == $setor ? 'selected' : ''; ?>>
+                                            <?php echo htmlspecialchars($setor); ?>
+                                        </option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+
+                            <div class="col-md-3 mb-3">
+                                <label for="treinamento_previsto" class="form-label">Treinamento Previsto</label>
+                                <select class="form-select" id="treinamento_previsto" name="treinamento_previsto">
+                                    <option value="">Todos</option>
+                                    <option value="sim" <?php echo $filtro_treinamento_previsto == 'sim' ? 'selected' : ''; ?>>Sim (Matriz Anual)</option>
+                                    <option value="nao" <?php echo $filtro_treinamento_previsto == 'nao' ? 'selected' : ''; ?>>Não</option>
+                                </select>
+                            </div>
+
+                            <div class="col-md-3 mb-3">
+                                <label for="qualidade_seguranca" class="form-label">Qualidade/Segurança</label>
+                                <select class="form-select" id="qualidade_seguranca" name="qualidade_seguranca">
+                                    <option value="">Todos</option>
+                                    <option value="sim" <?php echo $filtro_qualidade_seguranca == 'sim' ? 'selected' : ''; ?>>Sim</option>
+                                    <option value="nao" <?php echo $filtro_qualidade_seguranca == 'nao' ? 'selected' : ''; ?>>Não</option>
+                                </select>
+                            </div>
+                            
+                            <div class="col-md-12">
+                                <button type="submit" class="btn btn-primary me-2">
+                                    <i class="bi bi-funnel me-1"></i>Aplicar Filtros
+                                </button>
+                                <a href="ranking.php" class="btn btn-secondary">
+                                    <i class="bi bi-x-circle me-1"></i>Limpar Filtros
+                                </a>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </div>
+            
+            <?php if (isset($erro)): ?>
+                <div class="alert alert-danger">
+                    <i class="bi bi-exclamation-triangle me-2"></i>
+                    <?php echo $erro; ?>
+                </div>
+            <?php endif; ?>
+            
+            <?php if (empty($filtro_pessoa_especifica)): ?>
+            <div class="row mb-4">
+                <div class="col-md-3">
+                    <div class="stats-card">
+                        <div class="stats-icon">
+                            <i class="bi bi-people"></i>
+                        </div>
+                        <div class="stats-number">
+                            <?php echo $estatisticas['total_educadores']; ?>
+                        </div>
+                        <div class="stats-label">
+                            Educadores
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="stats-card">
+                        <div class="stats-icon">
+                            <i class="bi bi-person-check"></i>
+                        </div>
+                        <div class="stats-number">
+                            <?php echo $estatisticas['total_treinamentos']; ?>
+                        </div>
+                        <div class="stats-label">
+                            Treinamentos
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="stats-card">
+                        <div class="stats-icon">
+                            <i class="bi bi-mortarboard"></i>
+                        </div>
+                        <div class="stats-number">
+                            <?php echo $estatisticas['total_participantes']; ?>
+                        </div>
+                        <div class="stats-label">
+                            Participantes Distintos
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="stats-card">
+                        <div class="stats-icon">
+                            <i class="bi bi-award"></i>
+                        </div>
+                        <div class="stats-number">
+                            <?php echo $estatisticas['total_participacoes']; ?>
+                        </div>
+                        <div class="stats-label">
+                            Total de Participações
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <?php endif; ?>
+            
+            <?php if (!empty($filtro_pessoa_especifica) && $detalhes_pessoa): ?>
+            <div class="perfil-card mb-4">
+                <div class="perfil-header">
+                    <div class="perfil-avatar">
+                        <?php if ($filtro_ranking_tipo == 'educador'): ?>
+                            <i class="bi bi-person-badge"></i>
+                        <?php else: ?>
+                            <i class="bi bi-mortarboard"></i>
+                        <?php endif; ?>
+                    </div>
+                    <div class="perfil-info">
+                        <h3><?php echo htmlspecialchars($filtro_pessoa_especifica); ?></h3>
+                        <p class="mb-1">
+                            <?php if ($filtro_ranking_tipo == 'educador' && isset($detalhes_pessoa['setor_educador'])): ?>
+                                Setor: <?php echo htmlspecialchars($detalhes_pessoa['setor_educador']); ?>
+                            <?php endif; ?>
+                        </p>
+                        <p class="mb-0">Período: <?php echo $periodo_texto; ?></p>
+                    </div>
+                </div>
+                
+                <div class="perfil-stats">
+                    <?php if ($filtro_ranking_tipo == 'educador'): ?>
+                        <div class="stat-item">
+                            <div class="stat-value"><?php echo $detalhes_pessoa['total_treinamentos'] ?? 0; ?></div>
+                            <div class="stat-label">Treinamentos</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-value"><?php echo $detalhes_pessoa['total_participantes'] ?? 0; ?></div>
+                            <div class="stat-label">Participantes</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-value"><?php echo $detalhes_pessoa['treinamentos_matriz'] ?? 0; ?></div>
+                            <div class="stat-label">Matriz Anual</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-value"><?php echo $detalhes_pessoa['treinamentos_qualidade'] ?? 0; ?></div>
+                            <div class="stat-label">Qualidade/Segurança</div>
+                        </div>
+                    <?php else: ?>
+                        <div class="stat-item">
+                            <div class="stat-value"><?php echo $detalhes_pessoa['total_treinamentos_feitos'] ?? 0; ?></div>
+                            <div class="stat-label">Treinamentos Feitos</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-value"><?php echo $detalhes_pessoa['assuntos_distintos'] ?? 0; ?></div>
+                            <div class="stat-label">Assuntos Distintos</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-value"><?php echo $detalhes_pessoa['treinamentos_matriz'] ?? 0; ?></div>
+                            <div class="stat-label">Matriz Anual</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-value"><?php echo $detalhes_pessoa['treinamentos_qualidade'] ?? 0; ?></div>
+                            <div class="stat-label">Qualidade/Segurança</div>
+                        </div>
+                        <?php if (isset($detalhes_pessoa['horas_totais'])): ?>
+                        <div class="stat-item">
+                            <div class="stat-value"><?php echo round($detalhes_pessoa['horas_totais'], 1); ?>h</div>
+                            <div class="stat-label">Horas Totais</div>
+                        </div>
+                        <?php endif; ?>
+                    <?php endif; ?>
+                </div>
+                <div class="d-flex justify-content-end mb-3">
+                    <a href="exportar_colaborador.php?tipo=<?php echo $filtro_ranking_tipo; ?>&nome=<?php echo urlencode($filtro_pessoa_especifica); ?>&periodo=<?php echo $filtro_periodo; ?>&tipo_periodo=<?php echo $filtro_tipo; ?>"
+                    class="btn btn-success">
+                        <i class="bi bi-download me-1"></i>Exportar Dados do Colaborador
+                    </a>
+                </div>
+            </div>
+            
+            <?php if (count($treinamentos_pessoa) > 0): ?>
+            <div class="card mb-4">
+                <div class="card-header">
+                    <h2 class="h5 mb-0">
+                        <?php echo $filtro_ranking_tipo == 'educador' ? 'Treinamentos Ministrados' : 'Treinamentos Participados'; ?>
+                    </h2>
+                </div>
+                <div class="card-body">
+                    <div class="table-responsive">
+                        <table class="table table-hover">
+                            <thead>
+                                <tr>
+                                    <th>Data</th>
+                                    <th>Assunto</th>
+                                    <?php if ($filtro_ranking_tipo == 'educador'): ?>
+                                        <th>Horário</th>
+                                        <th>Participantes</th>
+                                        <th>Duração</th>
+                                    <?php else: ?>
+                                        <th>Educador</th>
+                                        <th>Horário Treinamento</th>
+                                        <th>Horário Participação</th>
+                                        <th>Duração</th>
+                                        <th>Inconsistências</th>
+                                    <?php endif; ?>
+                                    <th>Tipo</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($treinamentos_pessoa as $treinamento): 
+                                    $inconsistencias = verificarInconsistenciaHorarios($treinamento);
+                                ?>
+                                <tr>
+                                    <td><?php echo date('d/m/Y', strtotime($treinamento['data_treinamento'])); ?></td>
+                                    <td><?php echo htmlspecialchars($treinamento['assunto']); ?></td>
+                                    
+                                    <?php if ($filtro_ranking_tipo == 'educador'): ?>
+                                        <td>
+                                            <?php echo date('H:i', strtotime($treinamento['hora_inicio'])); ?> - 
+                                            <?php echo !empty($treinamento['hora_fim']) ? date('H:i', strtotime($treinamento['hora_fim'])) : '--:--'; ?>
+                                        </td>
+                                        <td>
+                                            <?php if (isset($treinamento['participantes'])): ?>
+                                                <span class="badge bg-primary"><?php echo $treinamento['participantes']; ?></span>
+                                            <?php else: ?>
+                                                <span class="badge bg-secondary">-</span>
+                                            <?php endif; ?>
+                                        </td>
+                                        <td>
+                                            <?php 
+                                            $duracao_minutos = $treinamento['duracao_minutos'] ?? 0;
+                                            if ($duracao_minutos > 0) {
+                                                $horas = floor($duracao_minutos / 60);
+                                                $minutos = $duracao_minutos % 60;
+                                                echo sprintf("%dh%02d", $horas, $minutos);
+                                            } else {
+                                                echo "-";
+                                            }
+                                            ?>
+                                        </td>
+                                    <?php else: ?>
+                                        <td><?php echo htmlspecialchars($treinamento['nome_educador']); ?></td>
+                                        <td>
+                                            <?php echo date('H:i', strtotime($treinamento['hora_inicio'])); ?> - 
+                                            <?php echo !empty($treinamento['hora_fim']) ? date('H:i', strtotime($treinamento['hora_fim'])) : '--:--'; ?>
+                                        </td>
+                                        <td>
+                                            <?php echo date('H:i', strtotime($treinamento['hora_entrada'])); ?> - 
+                                            <?php echo !empty($treinamento['hora_saida']) ? date('H:i', strtotime($treinamento['hora_saida'])) : '--:--'; ?>
+                                        </td>
+                                        <td>
+                                            <?php 
+                                            $duracao_minutos = $treinamento['duracao_participacao_minutos'] ?? 0;
+                                            if ($duracao_minutos > 0) {
+                                                $horas = floor($duracao_minutos / 60);
+                                                $minutos = $duracao_minutos % 60;
+                                                echo sprintf("%dh%02d", $horas, $minutos);
+                                            } else {
+                                                echo "-";
+                                            }
+                                            ?>
+                                        </td>
+                                        <td>
+                                            <?php if (!empty($inconsistencias)): ?>
+                                                <span class="badge bg-warning" data-bs-toggle="tooltip" 
+                                                    title="<?php echo htmlspecialchars(implode(', ', $inconsistencias)); ?>">
+                                                    <i class="bi bi-exclamation-triangle"></i>
+                                                    <?php echo count($inconsistencias); ?>
+                                                </span>
+                                            <?php else: ?>
+                                                <span class="badge bg-success">OK</span>
+                                            <?php endif; ?>
+                                        </td>
+                                    <?php endif; ?>
+                                    
+                                    <td>
+                                        <?php if (!empty($treinamento['matriz_anual'])): ?>
+                                            <span class="badge bg-warning text-dark">Matriz</span>
+                                        <?php endif; ?>
+                                        <?php if (!empty($treinamento['qualidade_seguranca'])): ?>
+                                            <span class="badge bg-danger">Qualidade/Segurança</span>
+                                        <?php endif; ?>
+                                    </td>
+                                </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+            <?php endif; ?>
+            <?php endif; ?>
+            
+            <?php if (empty($filtro_pessoa_especifica) && count($ranking_data) > 0): ?>
+            <div class="card">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h2 class="h5 mb-0">
+                        <?php if ($filtro_ranking_tipo == 'educador'): ?>
+                            <i class="bi bi-person-badge me-2"></i>
+                            Ranking de Educadores - <?php echo $periodo_texto; ?>
+                        <?php else: ?>
+                            <i class="bi bi-mortarboard me-2"></i>
+                            Ranking de Participantes - <?php echo $periodo_texto; ?>
+                        <?php endif; ?>
+                    </h2>
+                    <span class="badge bg-primary"><?php echo count($ranking_data); ?> registros</span>
+                </div>
+                <div class="card-body">
+                    
+                    <?php if (count($ranking_data) >= 3): ?>
+                    <div class="podium">
+                        <?php if (isset($ranking_data[1])): ?>
+                            <div class="podium-item">
+                                <div class="podium-place second-place">2º</div>
+                                <div class="podium-name">
+                                    <?php echo htmlspecialchars($ranking_data[1]['nome_educador'] ?? $ranking_data[1]['nome_participante'] ?? 'N/A'); ?>
+                                    <br>
+                                    <small>
+                                        <?php if ($filtro_ranking_tipo == 'educador'): ?>
+                                            <?php echo $ranking_data[1]['total_treinamentos'] ?? 0; ?> treinamentos
+                                        <?php else: ?>
+                                            <?php echo $ranking_data[1]['total_treinamentos_feitos'] ?? 0; ?> treinamentos
+                                        <?php endif; ?>
+                                    </small>
+                                </div>
+                            </div>
+                        <?php endif; ?>
+                        
+                        <?php if (isset($ranking_data[0])): ?>
+                            <div class="podium-item">
+                                <div class="podium-place first-place">1º</div>
+                                <div class="podium-name">
+                                    <?php echo htmlspecialchars($ranking_data[0]['nome_educador'] ?? $ranking_data[0]['nome_participante'] ?? 'N/A'); ?>
+                                    <br>
+                                    <small>
+                                        <?php if ($filtro_ranking_tipo == 'educador'): ?>
+                                            <?php echo $ranking_data[0]['total_treinamentos'] ?? 0; ?> treinamentos
+                                        <?php else: ?>
+                                            <?php echo $ranking_data[0]['total_treinamentos_feitos'] ?? 0; ?> treinamentos
+                                        <?php endif; ?>
+                                    </small>
+                                </div>
+                            </div>
+                        <?php endif; ?>
+                        
+                        <?php if (isset($ranking_data[2])): ?>
+                            <div class="podium-item">
+                                <div class="podium-place third-place">3º</div>
+                                <div class="podium-name">
+                                    <?php echo htmlspecialchars($ranking_data[2]['nome_educador'] ?? $ranking_data[2]['nome_participante'] ?? 'N/A'); ?>
+                                    <br>
+                                    <small>
+                                        <?php if ($filtro_ranking_tipo == 'educador'): ?>
+                                            <?php echo $ranking_data[2]['total_treinamentos'] ?? 0; ?> treinamentos
+                                        <?php else: ?>
+                                            <?php echo $ranking_data[2]['total_treinamentos_feitos'] ?? 0; ?> treinamentos
+                                        <?php endif; ?>
+                                    </small>
+                                </div>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                    <?php endif; ?>
+                    
+                    <div class="table-responsive">
+                        <table class="table table-hover ranking-table">
+                            <thead>
+                                <tr>
+                                    <th width="60">Posição</th>
+                                    <?php if ($filtro_ranking_tipo == 'educador'): ?>
+                                        <th>Educador</th>
+                                        <th>Setor</th>
+                                        <th>Treinamentos</th>
+                                        <th>Participantes</th>
+                                        <th>Matriz Anual</th>
+                                        <th>Qualidade/Segurança</th>
+                                        <th>Período</th>
+                                    <?php else: ?>
+                                        <th>Participante</th>
+                                        <th>Setor</th>
+                                        <th>Treinamentos Feitos</th>
+                                        <th>Assuntos Distintos</th>
+                                        <th>Matriz Anual</th>
+                                        <th>Qualidade/Segurança</th>
+                                        <th>Período</th>
+                                        <th>Horas Totais</th>
+                                    <?php endif; ?>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($ranking_data as $index => $item): 
+                                    $posicao = $index + 1;
+                                    $badge_class = '';
+                                    if ($posicao == 1) $badge_class = 'gold';
+                                    elseif ($posicao == 2) $badge_class = 'silver';
+                                    elseif ($posicao == 3) $badge_class = 'bronze';
+                                ?>
+                                <tr>
+                                    <td>
+                                        <span class="ranking-badge <?php echo $badge_class; ?>">
+                                            <?php echo $posicao; ?>º
+                                        </span>
+                                    </td>
+                                    
+                                    <?php if ($filtro_ranking_tipo == 'educador'): ?>
+                                        <td>
+                                            <strong><?php echo htmlspecialchars($item['nome_educador'] ?? 'N/A'); ?></strong>
+                                        </td>
+                                        <td><?php echo htmlspecialchars($item['setor_educador'] ?? '-'); ?></td>
+                                        <td>
+                                            <span class="badge bg-primary"><?php echo $item['total_treinamentos'] ?? 0; ?></span>
+                                        </td>
+                                        <td>
+                                            <span class="badge bg-success"><?php echo $item['total_participantes'] ?? 0; ?></span>
+                                        </td>
+                                        <td>
+                                            <?php if (($item['treinamentos_matriz'] ?? 0) > 0): ?>
+                                                <span class="badge bg-warning text-dark"><?php echo $item['treinamentos_matriz']; ?></span>
+                                            <?php else: ?>
+                                                <span class="text-muted">-</span>
+                                            <?php endif; ?>
+                                        </td>
+                                        <td>
+                                            <?php if (($item['treinamentos_qualidade'] ?? 0) > 0): ?>
+                                                <span class="badge bg-danger"><?php echo $item['treinamentos_qualidade']; ?></span>
+                                            <?php else: ?>
+                                                <span class="text-muted">-</span>
+                                            <?php endif; ?>
+                                        </td>
+                                        <td>
+                                            <?php 
+                                                $primeiro = !empty($item['primeiro_treinamento']) ? 
+                                                    date('d/m/Y', strtotime($item['primeiro_treinamento'])) : '-';
+                                                $ultimo = !empty($item['ultimo_treinamento']) ? 
+                                                    date('d/m/Y', strtotime($item['ultimo_treinamento'])) : '-';
+                                                echo "$primeiro a $ultimo";
+                                            ?>
+                                        </td>
+                                    <?php else: ?>
+                                        <td>
+                                            <strong><?php echo htmlspecialchars($item['nome_participante'] ?? 'N/A'); ?></strong>
+                                        </td>
+                                        <td>
+                                            <?php echo htmlspecialchars($item['setor_participante'] ?? '-'); ?>
+                                        </td>
+                                        <td>
+                                            <span class="badge bg-primary"><?php echo $item['total_treinamentos_feitos'] ?? 0; ?></span>
+                                        </td>
+                                        <td>
+                                            <span class="badge bg-info"><?php echo $item['assuntos_distintos'] ?? 0; ?></span>
+                                        </td>
+                                        <td>
+                                            <?php if (($item['treinamentos_matriz'] ?? 0) > 0): ?>
+                                                <span class="badge bg-warning text-dark"><?php echo $item['treinamentos_matriz']; ?></span>
+                                            <?php else: ?>
+                                                <span class="text-muted">-</span>
+                                            <?php endif; ?>
+                                        </td>
+                                        <td>
+                                            <?php if (($item['treinamentos_qualidade'] ?? 0) > 0): ?>
+                                                <span class="badge bg-danger"><?php echo $item['treinamentos_qualidade']; ?></span>
+                                            <?php else: ?>
+                                                <span class="text-muted">-</span>
+                                            <?php endif; ?>
+                                        </td>
+                                        <td>
+                                            <?php 
+                                                $primeiro = !empty($item['primeiro_treinamento']) ? 
+                                                    date('d/m/Y', strtotime($item['primeiro_treinamento'])) : '-';
+                                                $ultimo = !empty($item['ultimo_treinamento']) ? 
+                                                    date('d/m/Y', strtotime($item['ultimo_treinamento'])) : '-';
+                                                echo "$primeiro a $ultimo";
+                                            ?>
+                                        </td>
+                                        <td>
+                                            <?php if (isset($item['horas_totais']) && $item['horas_totais'] > 0): ?>
+                                                <span class="badge bg-success"><?php echo round($item['horas_totais'], 1); ?>h</span>
+                                            <?php else: ?>
+                                                <span class="badge bg-secondary">-</span>
+                                            <?php endif; ?>
+                                        </td>
+                                    <?php endif; ?>
+                                </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+            <?php elseif (empty($filtro_pessoa_especifica)): ?>
+                <div class="alert alert-info">
+                    <i class="bi bi-info-circle me-2"></i>
+                    Nenhum dado encontrado para o período selecionado.
+                </div>
+            <?php endif; ?>
+            
+            <div class="alert alert-info mt-4">
+                <h5 class="alert-heading"><i class="bi bi-info-circle me-2"></i>Como usar o ranking</h5>
+                <ul class="mb-0">
+                    <li><strong>1. Escolha o tipo de ranking:</strong> Educadores ou Participantes</li>
+                    <li><strong>2. Selecione o período:</strong> Mensal ou Anual e escolha o mês/ano específico</li>
+                    <li><strong>3. Use os filtros adicionais:</strong> Setor, Matriz Anual, Qualidade/Segurança</li>
+                    <li><strong>4. Para ver ranking geral:</strong> Deixe "Todos (Ranking Geral)" selecionado</li>
+                    <li><strong>5. Para ver dados de uma pessoa específica:</strong> Selecione o nome da pessoa</li>
+                    <li><strong>6. Para exportar dados:</strong> Clique no botão "Exportar Dados do Colaborador"</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+
+<footer>
+    <div class="container">
+        <p class="mb-0">Desenvolvido pelo setor de Tecnologia da Informação do HMSF</p>
+        <p class="mb-0 small">Versão 3.0.0 | Ranking gerado em: <?php echo date('d/m/Y H:i'); ?></p>
+    </div>
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+    function updatePeriodoInput() {
+        const tipo = document.getElementById('tipo').value;
+        const periodoLabel = document.getElementById('periodo_label');
+        const periodoInput = document.getElementById('periodo');
+        const currentValue = periodoInput.value;
+        
+        if (tipo === 'mes') {
+            periodoLabel.textContent = 'Mês/Ano';
+            const newInput = document.createElement('input');
+            newInput.type = 'month';
+            newInput.className = 'form-control';
+            newInput.id = 'periodo';
+            newInput.name = 'periodo';
+            
+            if (currentValue.length === 4) {
+                newInput.value = currentValue + '-' + (new Date().getMonth() + 1).toString().padStart(2, '0');
+            } else if (currentValue.includes('-')) {
+                newInput.value = currentValue;
+            } else {
+                newInput.value = new Date().toISOString().slice(0, 7);
+            }
+            
+            periodoInput.parentNode.replaceChild(newInput, periodoInput);
+        } else {
+            periodoLabel.textContent = 'Ano';
+            const newInput = document.createElement('input');
+            newInput.type = 'number';
+            newInput.className = 'form-control';
+            newInput.id = 'periodo';
+            newInput.name = 'periodo';
+            newInput.min = '2020';
+            newInput.max = new Date().getFullYear().toString();
+            
+            if (currentValue.includes('-')) {
+                newInput.value = currentValue.split('-')[0];
+            } else if (currentValue.length === 4) {
+                newInput.value = currentValue;
+            } else {
+                newInput.value = new Date().getFullYear().toString();
+            }
+            
+            periodoInput.parentNode.replaceChild(newInput, periodoInput);
+        }
+    }
+    
+    document.getElementById('ranking_tipo').addEventListener('change', function() {
+        const pessoaLabel = document.getElementById('pessoa_label');
+        const pessoaSelect = document.getElementById('pessoa_especifica');
+        
+        if (this.value === 'educador') {
+            pessoaLabel.textContent = 'Educador Específico';
+            pessoaSelect.value = '';
+        } else {
+            pessoaLabel.textContent = 'Participante Específico';
+            pessoaSelect.value = '';
+        }
+    });
+    
+    document.addEventListener('DOMContentLoaded', function() {
+        const periodoInput = document.getElementById('periodo');
+        if (!periodoInput?.value) {
+            const tipo = document.getElementById('tipo').value;
+            if (tipo === 'mes') {
+                document.getElementById('periodo').value = new Date().toISOString().slice(0, 7);
+            } else {
+                document.getElementById('periodo').value = new Date().getFullYear().toString();
+            }
+        }
+        
+        // Inicializar tooltips
+        var tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
+        var tooltipList = tooltipTriggerList.map(function (tooltipTriggerEl) {
+            return new bootstrap.Tooltip(tooltipTriggerEl);
+        });
+    });
+</script>
+</body>
+</html>
